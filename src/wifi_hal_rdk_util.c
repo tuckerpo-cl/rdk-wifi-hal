@@ -64,13 +64,14 @@ wifi_device_callbacks_t *get_device_callbacks()
 {
     return &g_device_callbacks;
 }
-
+#if !defined(PLATFORM_LINUX)
 char *to_mac_str (mac_address_t mac, mac_addr_str_t key) {
     snprintf(key, 18, "%02x:%02x:%02x:%02x:%02x:%02x",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
     return (char *)key;
 }
+#endif
 
 void to_mac_bytes (mac_addr_str_t key, mac_address_t bmac) {
    unsigned int mac[6];
@@ -96,6 +97,7 @@ const char *wifi_freq_bands_to_string(wifi_freq_bands_t band)
     return "WIFI_FREQUENCY_UNKNOWN";
 }
 
+#if !defined(PLATFORM_LINUX)
 char *get_formatted_time(char *time)
 {
     struct tm *tm_info;
@@ -110,7 +112,7 @@ char *get_formatted_time(char *time)
     snprintf(time, 128, "%s.%06lu", tmp, tv_now.tv_usec);
     return time;
 }
-
+#endif
 
 static int move_radio_capability(wifi_radio_capabilities_t *tmp_cap, wifi_radio_capabilities_t *cap,
     unsigned int arr_loc)
@@ -431,4 +433,12 @@ int validate_wifi_interface_vap_info_params(wifi_vap_info_t *vap_info, char *msg
     }
 
     return ret;
+}
+
+time_t get_boot_time_in_sec(void)
+{
+    struct timespec tv_now;
+
+    clock_gettime(CLOCK_MONOTONIC, &tv_now);
+    return tv_now.tv_sec;
 }

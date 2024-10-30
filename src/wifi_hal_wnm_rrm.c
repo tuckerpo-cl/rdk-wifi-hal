@@ -537,6 +537,7 @@ static int handle_rx_wnm_notification_req(wifi_interface_info_t *interface,
     return WIFI_HAL_UNSUPPORTED;
 }
 
+#if !defined(PLATFORM_LINUX)
 int handle_wnm_action_frame(wifi_interface_info_t *interface, const mac_address_t sta, struct ieee80211_mgmt *mgmt, size_t len)
 {
     u8 action;
@@ -725,6 +726,7 @@ int wifi_rrm_send_beacon_req(wifi_interface_info_t *interface, const u8 *addr,
 
     return hapd->beacon_req_token;
 }
+#endif
 
 static void wifi_set_disassoc_timer(struct hostapd_data *hapd, struct sta_info *sta,
                 int disassoc_timer)
@@ -758,6 +760,7 @@ static void wifi_set_disassoc_timer(struct hostapd_data *hapd, struct sta_info *
                 ap_handle_timer, hapd, sta);
 }
 
+#if !defined(PLATFORM_LINUX)
 /* Implementation is based on wnm_send_bss_tm_req() from wnm_ap.c */
 int wifi_wnm_send_bss_tm_req(wifi_interface_info_t *interface, struct sta_info *sta,
             u8 dialog_token, u8 req_mode, int disassoc_timer, u8 valid_int,
@@ -857,7 +860,7 @@ int wifi_wnm_send_bss_tm_req(wifi_interface_info_t *interface, struct sta_info *
 
     return dialog_token;
 }
-
+#endif
 
 /*************************************/
 
@@ -1020,6 +1023,7 @@ static int handle_radio_msmt_report(wifi_interface_info_t *interface, const mac_
     return WIFI_HAL_SUCCESS;
 }
 
+#if !defined(PLATFORM_LINUX)
 int handle_rrm_action_frame(wifi_interface_info_t *interface, const mac_address_t sta,
                     const struct ieee80211_mgmt *mgmt, size_t len, int ssi_signal)
 {
@@ -1043,3 +1047,4 @@ int handle_rrm_action_frame(wifi_interface_info_t *interface, const mac_address_
     }
     return WIFI_HAL_UNSUPPORTED;
 }
+#endif

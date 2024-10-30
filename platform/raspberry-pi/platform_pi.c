@@ -9,10 +9,15 @@
 #define MAX_BUF_SIZE 128
 #define MAX_CMD_SIZE 1024
 #define RPI_LEN_32 32
+#define INVALID_KEY                      "12345678"
 
 int wifi_nvram_defaultRead(char *in,char *out);
 int _syscmd(char *cmd, char *retBuf, int retBufSize);
 
+
+/* FIXME: VIKAS/PRAMOD:
+ * If wifi_nvram_defaultRead fail, handle appropriately in callers.
+ */
 int wifi_nvram_defaultRead(char *in,char *out)
 {
     char buf[MAX_BUF_SIZE]={'\0'};
@@ -123,6 +128,11 @@ int platform_get_keypassphrase_default(char *password, int vap_index)
     wifi_hal_dbg_print("%s:%d \n",__func__,__LINE__);  
     /*password is not sensitive,won't grant access to real devices*/ 
     wifi_nvram_defaultRead("rpi_wifi_password",password);
+    if (strlen(password) == 0) {
+       wifi_hal_error_print("%s:%d nvram default password not found, "
+           "enforced alternative default password\n", __func__, __LINE__);
+       strncpy(password, INVALID_KEY, strlen(INVALID_KEY) + 1);
+    }
     return 0;
 }
 
@@ -282,7 +292,48 @@ int wifi_setApRetrylimit(void *priv)
     return 0;
 }
 
+
+INT wifi_getRadioChannelStats(INT radioIndex, wifi_channelStats_t *input_output_channelStats_array,
+    INT array_size)
+{
+    return RETURN_OK;
+}
+//--------------------------------------------------------------------------------------------------
+INT wifi_getApEnable(INT apIndex, BOOL *output_bool)
+{
+    return RETURN_OK;
+}
+
+//--------------------------------------------------------------------------------------------------
+INT wifi_setApMacAddressControlMode(INT apIndex, INT filterMode)
+{
+    return RETURN_OK;
+}
+
+
+//--------------------------------------------------------------------------------------------------
+INT wifi_getBssLoad(INT apIndex, BOOL *enabled)
+{
+    return RETURN_ERR;
+}
+
+//--------------------------------------------------------------------------------------------------
+INT wifi_setLayer2TrafficInspectionFiltering(INT apIndex, BOOL enabled)
+{
+    return RETURN_ERR;
+}
+//--------------------------------------------------------------------------------------------------
+INT wifi_setApIsolationEnable(INT apIndex, BOOL enable)
+{
+    return RETURN_ERR;
+}
+
 int platform_get_radio_caps(wifi_radio_index_t index)
+{ 
+    return 0;
+}
+
+INT wifi_getApDeviceRSSI(INT ap_index, CHAR *MAC, INT *output_RSSI)
 {
     return 0;
 }
@@ -426,4 +477,8 @@ INT wifi_sendActionFrame(INT apIndex, mac_address_t MacAddr, UINT frequency, UCH
 INT wifi_setDownStreamGroupAddress(INT apIndex, BOOL disabled)
 {
     return 0;
+}
+INT wifi_getApAssociatedClientDiagnosticResult(INT ap_index, char *key,wifi_associated_dev3_t *assoc)
+{
+    return RETURN_ERR;
 }
