@@ -37,9 +37,11 @@
 #include "pcap.h"
 #include "ieee80211.h"
 
-
+#if defined(PLATFORM_LINUX)
+extern unsigned char wifi_common_hal_test_signature[8];
+#else
 unsigned char wifi_common_hal_test_signature[8] = {0x11, 0x22, 0x22, 0x33, 0x44, 0x44, 0x55, 0x66};
-       
+#endif
 bool is_matching_cmd_in_list(wifi_test_command_id_t matching_cmd, frame_test_arg_t *arg)
 {
        unsigned int i;

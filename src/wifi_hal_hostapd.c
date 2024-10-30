@@ -82,13 +82,9 @@ void wifi_authenticator_run()
 void init_radius_config(wifi_interface_info_t *interface)
 {
     if (!interface->vap_initialized) {
-        struct hostapd_radius_servers *radius;
         struct hostapd_bss_config *conf;
-        struct hostapd_radius_server *servers;
         char *config_methods = (char *)malloc(WPS_METHODS_SIZE);
         memset(config_methods, '\0', WPS_METHODS_SIZE);
-        char *shared_secret_1 = NULL;
-        char *shared_secret_2 = NULL;
 
         //wifi_vap_info_t *vap;
         //int ap_index;
@@ -96,19 +92,9 @@ void init_radius_config(wifi_interface_info_t *interface)
         // vap = &interface->vap_info;
         //  ap_index = vap->vap_index;
 
-        shared_secret_1 = (char *)malloc(64);
-        shared_secret_2 = (char *)malloc(64);
-        servers = (struct hostapd_radius_server *)malloc(2*sizeof(struct hostapd_radius_server));
-        memset(servers, 0, 2*sizeof(struct hostapd_radius_server));
         conf = &interface->u.ap.conf;
-        radius = &interface->u.ap.radius;
-        conf->radius = radius;
-        radius->num_auth_servers = 2;
-        radius->auth_servers = servers;
-        radius->auth_server = &servers[0];
-        radius->num_acct_servers = 0;
-        radius->auth_servers[0].shared_secret = shared_secret_1;
-        radius->auth_servers[1].shared_secret = shared_secret_2;
+        conf->radius = &interface->u.ap.radius;
+        conf->radius->num_acct_servers = 0;
 
         conf->nas_identifier = interface->u.ap.nas_identifier;
         char *wpa_passphrase = (char *)malloc(256);
@@ -227,6 +213,7 @@ void init_hostap_bss(wifi_interface_info_t *interface)
     conf->broadcast_deauth = 1;
 
 #ifdef CONFIG_MBO
+    conf->mbo_enabled = 0;
 //Not Defined
     conf->mbo_cell_data_conn_pref = -1;
 #endif /* CONFIG_MBO */
@@ -256,6 +243,11 @@ void init_hostap_bss(wifi_interface_info_t *interface)
 
     /* Default to strict CRL checking. */
     conf->check_crl_strict = 1;
+
+#ifdef CONFIG_BSS_LOAD
+    // updated by driver
+    conf->bss_load_update_period = 360000;
+#endif
 
     /* Vendor Specific IE */
     platform_get_vendor_oui_t platform_get_vendor_oui_fn = get_platform_vendor_oui_fn();
@@ -306,7 +298,9 @@ void init_oem_config(wifi_interface_info_t *interface)
     strcpy(interface->model_description, device_info.model_description);
     strcpy(interface->model_url, device_info.model_url);
 
+#if !defined(PLATFORM_LINUX)
     conf->ap_vlan = interface->vlan;
+#endif
 #endif
 }
 
@@ -594,6 +588,8 @@ int update_security_config(wifi_vap_security_t *sec, struct hostapd_bss_config *
 #ifdef CONFIG_IEEE80211BE
             switch (sec->mode) {
                 case wifi_security_mode_none:
+                case wifi_security_mode_wpa_wpa2_personal:
+                case wifi_security_mode_wpa2_personal:
                 case wifi_security_mode_wpa_enterprise:
                 case wifi_security_mode_wpa2_enterprise:
                 case wifi_security_mode_wpa_wpa2_enterprise:
@@ -640,14 +636,32 @@ int update_security_config(wifi_vap_security_t *sec, struct hostapd_bss_config *
 #endif
     if (conf->ieee802_1x || is_open_sec_radius_auth(sec)) {
         conf->disable_pmksa_caching = sec->disable_pmksa_caching;
-        if (conf->ieee802_1x && !conf->eap_server && !conf->radius->auth_servers) {
-            wifi_hal_error_print("%s:%d:Invalid 802.1x configuration in VAP setting\n", __func__, __LINE__);
-            return RETURN_ERR;
-        }
 
         if (sec->u.radius.ip == 0) {
             wifi_hal_error_print("%s:%d:Invalid radius server IP configuration in VAP setting\n", __func__, __LINE__);
             return RETURN_ERR;
+        }
+
+        if (conf->radius->auth_servers == NULL) {
+            static const unsigned int shared_secret_chunk = 64;
+            struct hostapd_radius_server *servers;
+            char *shared_secrets = NULL;
+
+            if ((shared_secrets = malloc(2 * shared_secret_chunk)) == NULL ||
+                (servers = malloc(2 * sizeof(*servers))) == NULL) {
+                wifi_hal_error_print(
+                    "%s:%d: Failed to allocate memory for radius secret or servers\n", __func__,
+                    __LINE__);
+                free(shared_secrets);
+                return RETURN_ERR;
+            }
+            memset(servers, 0, 2 * sizeof(*servers));
+
+            conf->radius->num_auth_servers = 2;
+            conf->radius->auth_servers = servers;
+            conf->radius->auth_server = servers + 1;
+            conf->radius->auth_servers[0].shared_secret = shared_secrets;
+            conf->radius->auth_servers[1].shared_secret = shared_secrets + shared_secret_chunk;
         }
 
         char output[256] = {0};
@@ -767,11 +781,21 @@ int update_security_config(wifi_vap_security_t *sec, struct hostapd_bss_config *
 
         //conf->identity_request_retry_interval = sec->u.radius.identity_req_retry_interval;
         //conf->radius->radius_server_retries = sec->u.radius.server_retries;
-    } else if (!is_open_sec(sec)) {
-        // set wpa passphrase security key and indication flag
-        strcpy(conf->ssid.wpa_passphrase, sec->u.key.key);
-        conf->ssid.wpa_passphrase_set = true;
-        conf->osen = 0;
+    } else {
+        if (conf->radius->auth_servers != NULL) {
+            free(conf->radius->auth_servers->shared_secret);
+            free(conf->radius->auth_servers);
+            conf->radius->auth_servers = NULL;
+            conf->radius->auth_server = NULL;
+            conf->radius->num_auth_servers = 0;
+        }
+
+        if (!is_open_sec(sec)) {
+            // set wpa passphrase security key and indication flag
+            strcpy(conf->ssid.wpa_passphrase, sec->u.key.key);
+            conf->ssid.wpa_passphrase_set = true;
+            conf->osen = 0;
+        }
     }
     return RETURN_OK;
 }
@@ -909,7 +933,7 @@ static void wifi_hal_wps_init(wifi_radio_info_t *radio, wifi_vap_info_t *vap,
 }
 #endif /* defined(CONFIG_WPS) */
 
-#if defined(CONFIG_HW_CAPABILITIES) || defined(CMXB7_PORT)
+#if defined(CONFIG_HW_CAPABILITIES)
 static struct hostapd_channel_data *hw_mode_get_channel(struct hostapd_hw_modes *mode, int freq,
     int *chan)
 {
@@ -1017,8 +1041,11 @@ int update_hostap_bss(wifi_interface_info_t *interface)
     conf->radio_measurements[0] |=  (WLAN_RRM_CAPS_BEACON_REPORT_PASSIVE | WLAN_RRM_CAPS_BEACON_REPORT_ACTIVE | WLAN_RRM_CAPS_BEACON_REPORT_TABLE);
     if(vap->u.bss_info.nbrReportActivated) {
         conf->radio_measurements[0] |= WLAN_RRM_CAPS_NEIGHBOR_REPORT;
-#ifdef CMXB7_PORT
+#if defined(CMXB7_PORT) || defined(MXL_WIFI)
         conf->radio_measurements[0] |= WLAN_RRM_CAPS_LINK_MEASUREMENT; 
+#endif
+#if defined(MXL_WIFI)
+        conf->radio_measurements[1] |= WLAN_RRM_CAPS_STATISTICS_MEASUREMENT | WLAN_RRM_CAPS_CHANNEL_LOAD;
 #endif
     }
     else {
@@ -1032,6 +1059,7 @@ int update_hostap_bss(wifi_interface_info_t *interface)
     interface->bss_transition_token = 0;
 #endif
 
+#if !defined(PLATFORM_LINUX)
     // connected_building_enabled
     if (is_wifi_hal_vap_hotspot_from_interfacename(conf->iface)) {
         conf->connected_building_avp = vap->u.bss_info.connected_building_enabled;
@@ -1045,7 +1073,7 @@ int update_hostap_bss(wifi_interface_info_t *interface)
         wifi_hal_dbg_print(" %s:%d:vlan_id is %d  \n", __func__, __LINE__,vlan_id);
         conf->ap_vlan = vlan_id;
     }
-
+#endif
 
 #if HOSTAPD_VERSION >= 210 
     int preassoc_min_mcs = convert_string_mcs_to_int(vap->u.bss_info.preassoc.minimum_advertised_mcs);
@@ -1087,11 +1115,13 @@ int update_hostap_bss(wifi_interface_info_t *interface)
         wifi_hal_dbg_print("gafDisable %d,p2pDisable %d l2tfi %d\n",vap->u.bss_info.interworking.passpoint.gafDisable,vap->u.bss_info.interworking.passpoint.p2pDisable,vap->u.bss_info.interworking.passpoint.l2tif);
         wifi_hal_dbg_print("%s:%d, Passpoint enabled hence add roaming consortium IE \n", __func__, __LINE__);
 
+#if !defined(PLATFORM_LINUX)
         conf->hs20 = 1;
         conf->hs20_release = 1;
+        conf->disable_dgaf = vap->u.bss_info.interworking.passpoint.gafDisable;
+#endif
         conf->roaming_consortium_count = 0;
         conf->roaming_consortium = NULL;
-        conf->disable_dgaf = vap->u.bss_info.interworking.passpoint.gafDisable;
         const wifi_roamingConsortiumElement_t *rc_p = &(vap->u.bss_info.interworking.roamingConsortium);
         unsigned char rc_cnt = rc_p->wifiRoamingConsortiumCount;
         wifi_hal_dbg_print("roaming consoritum count = %d\n",rc_cnt);
@@ -1117,10 +1147,21 @@ int update_hostap_bss(wifi_interface_info_t *interface)
         wifi_hal_dbg_print("%s:%d,Passpoint is disabled roaming consoritum and HS beacons are reset:\n", __func__, __LINE__);
         conf->roaming_consortium_count = 0;
         conf->roaming_consortium = NULL;
+#if !defined(PLATFORM_LINUX)
         conf->hs20 = 0;
         conf->hs20_release = 0;
         conf->disable_dgaf = 0;
+#endif
+   }
+
+#if defined(CONFIG_MBO)
+    conf->mbo_enabled = vap->u.bss_info.mbo_enabled;
+    /* MBO with WPA2 requires PMF */
+    if ((conf->wpa & 2) && conf->ieee80211w == NO_MGMT_FRAME_PROTECTION) {
+        conf->mbo_enabled = false;
     }
+#endif /* defined(CONFIG_MBO) */
+
     return RETURN_OK;
 }
 
@@ -1146,10 +1187,6 @@ int init_hostap_hw_features(wifi_interface_info_t *interface)
 
     if (iface->num_hw_features < 1) {
         return RETURN_ERR;
-    }
-
-    for (int n = 0; n < iface->num_hw_features; n++) {
-         memcpy(&radio->hw_modes[n], &iface->hw_features[n], sizeof(struct hostapd_hw_modes));
     }
 
     nlmode = wpa_driver_nl80211_if_type(WPA_IF_AP_BSS);
@@ -1350,7 +1387,7 @@ int update_hostap_iface(wifi_interface_info_t *interface)
     get_coutry_str_from_code(param->countryCode, country);
     iface->freq = ieee80211_chan_to_freq(country, param->op_class, param->channel);
 
-#if defined(CONFIG_HW_CAPABILITIES) || defined(CMXB7_PORT)
+#if defined(CONFIG_HW_CAPABILITIES)
     iface->current_mode = get_hw_mode(iface);
     if (iface->current_mode == NULL) {
         wifi_hal_error_print("%s:%d failed to get mode, interface: %s hw mode: %d, freq: %d\n",
@@ -1362,6 +1399,7 @@ int update_hostap_iface(wifi_interface_info_t *interface)
 #endif
     mode = iface->current_mode;
 
+#if !defined(PLATFORM_LINUX)
     if ((strlen (vap->u.bss_info.preassoc.supported_data_transmit_rates) > 0) && strcmp(vap->u.bss_info.preassoc.supported_data_transmit_rates, "disabled")) {
         if(iface->current_cac_rates) {
             os_free(iface->current_cac_rates);
@@ -1383,6 +1421,7 @@ int update_hostap_iface(wifi_interface_info_t *interface)
     else {
         iface->current_rates = radio->rate_data[band];
     }
+#endif
     wifi_hal_info_print("%s:%d: Interface: %s band: %d mode:%p (%d) has %d rates\n", __func__,
         __LINE__, interface->name, band, mode, mode->mode, mode->num_rates);
 
@@ -1410,7 +1449,8 @@ int update_hostap_iface(wifi_interface_info_t *interface)
 
     wifi_hal_info_print("%s:%d: Interface: %s band: %d mode:%p (%d) has %d rates\n", __func__,
         __LINE__, interface->name, band, mode, mode->mode, mode->num_rates);
-    iface->num_rates = 0; 
+    iface->num_rates = 0;
+#if !defined(PLATFORM_LINUX) 
     for (i = 0; i < mode->num_rates; i++) {
 /*
         if (iface->conf->supported_rates &&
@@ -1450,7 +1490,7 @@ int update_hostap_iface(wifi_interface_info_t *interface)
             iface->num_rates, rate->rate, rate->flags);
         iface->num_rates++;
     }
-
+#endif /* !defined(PLATFORM_LINUX) */
     cf1 = iface->freq;
     freq1 = cf1;
 
@@ -1501,7 +1541,7 @@ int update_hostap_iface(wifi_interface_info_t *interface)
         interface->u.ap.iface_initialized = true;
     }
 
-#if defined(CONFIG_HW_CAPABILITIES) || defined(CMXB7_PORT) || defined(VNTXER5_PORT)
+#if defined(CONFIG_HW_CAPABILITIES) || defined(VNTXER5_PORT)
     iface->drv_flags = radio->driver_data.capa.flags;
 #if HOSTAPD_VERSION >= 210
     iface->drv_flags2 = radio->driver_data.capa.flags2;
@@ -1670,9 +1710,27 @@ static void print_bw_variants_by_bitmask(uint32_t mask)
     }
 }
 
+#if defined(MXL_WIFI)
+static u8 find_bit_offset(u8 val)
+{
+    u8 res = 0;
+    for (; val; val >>= 1) {
+        if (val & 1)
+            break;
+        res++;
+    }
+    return res;
+}
+
+static u8 set_he_cap(int val, u8 mask)
+{
+    return (u8) (mask & (val << find_bit_offset(mask)));
+}
+#endif
+
 int update_hostap_config_params(wifi_radio_info_t *radio)
 {
-    unsigned int bandwidth;
+    unsigned char bandwidth;
     const int aCWmin = 4, aCWmax = 10;
     const struct hostapd_wmm_ac_params ac_bk = { aCWmin, aCWmax, 7, 0, 0 }; /* background traffic */
     const struct hostapd_wmm_ac_params ac_be = { aCWmin, aCWmax, 3, 0, 0 }; /* best effort traffic */
@@ -1702,20 +1760,60 @@ int update_hostap_config_params(wifi_radio_info_t *radio)
     iconf->rts_threshold = 2347; /* use driver default: 2347 */
     iconf->fragm_threshold = 2346; /* user driver default: 2346 */
 
-    iconf->local_pwr_constraint = 0;
-    iconf->spectrum_mgmt_required = 1;
+    if (param->DfsEnabled == true) {
+        /* updated by driver */
+        iconf->local_pwr_constraint = 0;
+        iconf->spectrum_mgmt_required = 1;
+    } else {
+        iconf->local_pwr_constraint = -1;
+        iconf->spectrum_mgmt_required = 0;
+    }
 
     iconf->wmm_ac_params[0] = ac_be;
     iconf->wmm_ac_params[1] = ac_bk;
     iconf->wmm_ac_params[2] = ac_vi;
     iconf->wmm_ac_params[3] = ac_vo;
 
+#if defined(MXL_WIFI)
+    iconf->he_mu_edca.he_qos_info |= HE_QOS_INFO_QUEUE_REQUEST;
+    iconf->he_mu_edca.he_mu_ac_be_param[HE_MU_AC_PARAM_ECW_IDX] |=
+        set_he_cap(15, HE_MU_AC_PARAM_ECWMIN);
+    iconf->he_mu_edca.he_mu_ac_be_param[HE_MU_AC_PARAM_ECW_IDX] |=
+        set_he_cap(15, HE_MU_AC_PARAM_ECWMAX);
+    iconf->he_mu_edca.he_mu_ac_be_param[HE_MU_AC_PARAM_TIMER_IDX] =
+        5 & 0xff;
+    iconf->he_mu_edca.he_mu_ac_bk_param[HE_MU_AC_PARAM_ACI_IDX] |=
+        set_he_cap(1, HE_MU_AC_PARAM_ACI);
+    iconf->he_mu_edca.he_mu_ac_bk_param[HE_MU_AC_PARAM_ECW_IDX] |=
+        set_he_cap(15, HE_MU_AC_PARAM_ECWMIN);
+    iconf->he_mu_edca.he_mu_ac_bk_param[HE_MU_AC_PARAM_ECW_IDX] |=
+        set_he_cap(15, HE_MU_AC_PARAM_ECWMAX);
+    iconf->he_mu_edca.he_mu_ac_bk_param[HE_MU_AC_PARAM_TIMER_IDX] =
+        5 & 0xff;
+    iconf->he_mu_edca.he_mu_ac_vi_param[HE_MU_AC_PARAM_ECW_IDX] |=
+        set_he_cap(15, HE_MU_AC_PARAM_ECWMIN);
+    iconf->he_mu_edca.he_mu_ac_vi_param[HE_MU_AC_PARAM_ECW_IDX] |=
+        set_he_cap(15, HE_MU_AC_PARAM_ECWMAX);
+    iconf->he_mu_edca.he_mu_ac_vi_param[HE_MU_AC_PARAM_ACI_IDX] |=
+        set_he_cap(2, HE_MU_AC_PARAM_ACI);
+    iconf->he_mu_edca.he_mu_ac_vi_param[HE_MU_AC_PARAM_TIMER_IDX] =
+        5 & 0xff;
+    iconf->he_mu_edca.he_mu_ac_vo_param[HE_MU_AC_PARAM_ACI_IDX] |=
+        set_he_cap(3, HE_MU_AC_PARAM_ACI);
+    iconf->he_mu_edca.he_mu_ac_vo_param[HE_MU_AC_PARAM_ECW_IDX] |=
+        set_he_cap(15, HE_MU_AC_PARAM_ECWMIN);
+    iconf->he_mu_edca.he_mu_ac_vo_param[HE_MU_AC_PARAM_ECW_IDX] |=
+        set_he_cap(15, HE_MU_AC_PARAM_ECWMAX);
+    iconf->he_mu_edca.he_mu_ac_vo_param[HE_MU_AC_PARAM_TIMER_IDX] =
+        5 & 0xff;
+#endif
+
     iconf->tx_queue[0] = txq_vo;
     iconf->tx_queue[1] = txq_vi;
     iconf->tx_queue[2] = txq_be;
     iconf->tx_queue[3] = txq_bk;
 
-#if !defined(CONFIG_HW_CAPABILITIES) && !defined(CMXB7_PORT)
+#if !defined(CONFIG_HW_CAPABILITIES)
     iconf->ht_capab = HT_CAP_INFO_SMPS_DISABLED;
 #endif
     iconf->ap_table_max_size = 255;
@@ -1753,7 +1851,7 @@ int update_hostap_config_params(wifi_radio_info_t *radio)
 
     iconf->ht_rifs = radio->oper_param.band == WIFI_FREQUENCY_2_4_BAND;
 #endif
-    iconf->obss_interval = 300;
+    iconf->obss_interval = radio->oper_param.band == WIFI_FREQUENCY_2_4_BAND ? 300 : 0;
 
     iconf->rssi_reject_assoc_rssi = 0;
     iconf->rssi_reject_assoc_timeout = 3;

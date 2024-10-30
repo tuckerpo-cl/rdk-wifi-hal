@@ -204,6 +204,28 @@ extern "C" {
 #define MAX_APPS 12
 
 #define SSID_MAX_LEN                32
+#define MAX_STEERING_GROUP_NUM      8
+
+/* use one sta table for different type lists:
+ * ASSOC:     the STA is associated
+ * ClientSet: the STA is configured by wifi_hal API ClientSet
+ * MACLIST:   the STA is added to mac filter for probe/auth response control
+ */
+#define BM_STA_TYPE_ASSOC      0x01
+#define BM_STA_TYPE_CLIENT_SET 0x02
+#define BM_STA_TYPE_MACLIST    0x04
+
+#define INACTIVITY_TIMEOUT      60
+#define STA_INFO_UPDATE_TIMEOUT 10
+
+#define AUTH_INVAL_REASON       2       /* Previous authentication no longer valid */
+
+#define BM_SENT_E_DISASSOC      (1 << 0)
+#define BM_SENT_E_ASSOC         (1 << 1)
+
+#if HOSTAPD_VERSION >= 211
+#define CHANWIDTH_320MHZ CONF_OPER_CHWIDTH_320MHZ
+#endif /* HOSTAPD_VERSION >= 211 */
 
 extern const struct wpa_driver_ops g_wpa_driver_nl80211_ops;
 #ifdef CONFIG_WIFI_EMULATOR
@@ -445,6 +467,8 @@ typedef struct wifi_interface_info_t {
     bool wnm_bss_trans_query_auto_resp;
     u8 bss_transition_token;
 #endif
+    /* Wi-Fi band steering sta_list_map */
+    hash_map_t  *bm_sta_map;
 #ifdef CONFIG_WIFI_EMULATOR
     unsigned char *ie;
     size_t ie_len;
@@ -533,6 +557,24 @@ typedef struct {
     wifi_hal_frame_hook_fn_t frame_hooks_fn[MAX_APPS];
 } wifi_device_frame_hooks_t;
 
+/* bm group info */
+typedef struct wifi_steering_apStats {
+    uint32_t avg_chan_util;
+    uint32_t chan_util_cnt;
+} wifi_steering_ap_stats_t;
+
+typedef struct wifi_bm_steering_group_info {
+    wifi_steering_apConfig_t  config;
+    //wifi_steering_ap_stats_t  bm_stats;
+} wifi_bm_steering_group_info_t;
+
+typedef struct wifi_steering_group {
+    uint32_t group_index;
+    uint32_t group_enable;
+    /* 0: 2G, 1: 5G, 2: 6G */
+    wifi_bm_steering_group_info_t bm_group_info[MAX_NUM_RADIOS];
+} wifi_bm_steering_group_t;
+
 typedef struct {
     pthread_t nl_tid;
     pthread_t hapd_eloop_tid;
@@ -556,9 +598,11 @@ typedef struct {
 #endif
     pthread_mutexattr_t hapd_lock_attr;
     pthread_mutex_t hapd_lock;
+    pthread_mutex_t steering_data_lock;
+    wifi_bm_steering_group_t  bm_steer_groups[MAX_STEERING_GROUP_NUM];
 } wifi_hal_priv_t;
 
-wifi_hal_priv_t g_wifi_hal;
+extern wifi_hal_priv_t g_wifi_hal;
 
 typedef int    (* platform_pre_init_t)();
 #if HAL_IPC
@@ -590,6 +634,10 @@ typedef int    (* platform_get_radio_phytemperature_t)(wifi_radio_index_t index,
 typedef int    (* platform_set_dfs_t)(wifi_radio_index_t index, wifi_radio_operationParam_t *operationParam);
 typedef int    (* platform_get_radio_caps_t)(wifi_radio_index_t index);
 
+typedef struct {
+    wifi_channelStats_t *arr;
+    int arr_size;
+}channel_stats_arr_t;
 struct ieee80211_he_cap_elem {
     u8 mac_cap_info[6];
     u8 phy_cap_info[11];
@@ -653,6 +701,41 @@ typedef struct {
     platform_set_dfs_t                platform_set_dfs_fn;
     platform_get_radio_caps_t         platform_get_radio_caps_fn;
 } wifi_driver_info_t;
+
+typedef enum bm_sta_rssi_type {
+    BM_STA_RSSI_PROBE = 1,
+    BM_STA_RSSI_AUTH,
+    BM_STA_RSSI_INACTIVE,
+    BM_STA_RSSI_XING,
+    BM_STA_RSSI_MAX_TYPE
+} bm_sta_rssi_type_t;
+
+typedef enum client_state {
+    ACTIVE = 1,
+    INACTIVE,
+    MAX_STATE
+} client_state_t;
+
+typedef struct {
+    mac_address_t mac_addr;
+    time_t assoc_time;              /* Assoc Timestamp */
+    time_t disassoc_time;           /* Disassoc Timestamp */
+    time_t active;                  /* activity timestamp */
+    uint8_t vap_index;              /* if index */
+    char    ssid[SSID_MAX_LEN];
+    uint8_t inactive_state;         /* based on traffic */
+    int32_t rssi;                   /* per antenna rssi */
+    int32_t rssi_changed;           /* crossing state */
+    int32_t  rssi_change_auth;      /* crossing state */
+    int32_t  rssi_change_assoc;     /* crossing state */
+    uint8_t  type;                  /* the mac is added by API (clientSet) or assoc */
+    uint8_t  is_acl_set;
+    client_state_t state;           /* Connected, disconnected etc */
+    uint32_t event_sent;            /* avoid duplicates */
+    unsigned long int rx_tot_pkts;
+    unsigned long int tx_tot_pkts;
+    wifi_steering_clientConfig_t  bm_client_cfg;
+} bm_sta_list_t;
 
 INT wifi_hal_init();
 INT wifi_hal_pre_init();
@@ -747,9 +830,19 @@ int     nl80211_interface_enable(const char *ifname, bool enable);
 void    nl80211_steering_event(UINT steeringgroupIndex, wifi_steering_event_t *event);
 int     nl80211_connect_sta(wifi_interface_info_t *interface);
 #if defined(TCXB7_PORT) || defined(TCXB8_PORT) || defined(XB10_PORT)
+
+typedef struct {
+    bool emu_enable;
+    uint32_t radio_index;
+    uint32_t neighbor_count;
+    wifi_neighbor_ap2_t data[];  // flexible array member
+} emu_neighbor_stats_t;
+
 int     wifi_hal_emu_set_radio_channel_stats(unsigned int radio_index, bool emu_state, wifi_channelStats_t *chan_stat, unsigned int count, unsigned int phy_index, unsigned int interface_index);
 int     wifi_hal_emu_set_assoc_clients_stats(unsigned int vap_index, bool emu_state, wifi_associated_dev3_t *assoc_cli_stat, unsigned int count, unsigned int phy_index, unsigned int interface_index);
 int     wifi_hal_emu_set_radio_temp (unsigned int radio_index, bool emu_state, int temperature, unsigned int phy_index, unsigned int interface_index);
+int     wifi_hal_emu_set_radio_diag_stats(unsigned int radio_index, bool emu_state, wifi_radioTrafficStats2_t *radio_diag_stat, unsigned int count, unsigned int phy_index, unsigned int interface_index);
+int     wifi_hal_emu_set_neighbor_stats(unsigned int radio_index, bool emu_state, wifi_neighbor_ap2_t *neighbor_stats, unsigned int count);
 #endif
 int     nl80211_start_scan(wifi_interface_info_t *interface, uint flags,
         unsigned int num_freq, unsigned int  *freq_list, unsigned int dwell_time,
@@ -758,6 +851,7 @@ int     nl80211_get_scan_results(wifi_interface_info_t *interface);
 int     nl80211_switch_channel(wifi_radio_info_t *radio);
 int     nl80211_tx_control_port(wifi_interface_info_t *interface, const u8 *dest, u16 proto, const u8 *buf, size_t len, int no_encrypt);
 int     nl80211_set_acl(wifi_interface_info_t *interface);
+int     nl80211_set_acl_mode(wifi_interface_info_t *interface, uint32_t mac_filter_mode);
 int     nl80211_set_mac(wifi_interface_info_t *interface);
 int     nl80211_dfs_cac_started(wifi_interface_info_t *interface, int freq, int ht_enabled, int sec_channel_offset, int bandwidth, int bw, int cf1, int cf2);
 int     nl80211_dfs_radar_cac_aborted(wifi_interface_info_t *interface, int freq, int ht_enabled, int sec_channel_offset, int bandwidth, int bw, int cf1, int cf2);
@@ -918,6 +1012,17 @@ int nl80211_set_regulatory_domain(wifi_countrycode_type_t country_code);
 int platform_get_channel_bandwidth(wifi_radio_index_t index, wifi_channelBandwidth_t *channelWidth);
 int wifi_drv_getApAclDeviceNum(int vap_index, uint *acl_count);
 int platform_get_acl_num(int vap_index, uint *acl_hal_count);
+int steering_set_acl_mode(uint32_t apIndex, uint32_t mac_filter_mode);
+
+wifi_steering_apConfig_t* steering_find_ap_cfg(int vap_index, uint32_t *g_idx);
+int wifi_steering_add_mac_list(uint32_t vap_index, bm_sta_list_t *sta_info);
+int wifi_steering_del_mac_list(uint32_t vap_index, bm_sta_list_t *sta_info);
+INT wifi_hal_steering_clientDisconnect( UINT steeringgroupIndex, INT apIndex, mac_address_t client_mac,
+                                        wifi_disconnectType_t type, UINT reason);
+bm_sta_list_t *steering_add_stalist(wifi_interface_info_t *interface, char *ssid, mac_address_t client_mac, uint8_t type);
+void steering_del_stalist(wifi_interface_info_t *interface, mac_address_t client_mac, uint8_t type);
+void re_configure_steering_mac_list(wifi_interface_info_t *interface);
+time_t get_boot_time_in_sec(void);
 
 int get_total_num_of_vaps(void);
 int wifi_setQamPlus(void *priv);
@@ -1083,13 +1188,14 @@ int str_list_append(char *dest, size_t dest_size, const char *src);
 int wifi_ieee80211Variant_to_str(char *dest, size_t dest_size, wifi_ieee80211Variant_t variant);
 int wifi_channelBandwidth_to_str(char *dest, size_t dest_size, wifi_channelBandwidth_t bandwidth);
 int wifi_bitrate_to_str(char *dest, size_t dest_size, wifi_bitrate_t bitrate);
+void init_interface_map(void);
 #ifdef CONFIG_WIFI_EMULATOR
-void init_interface_map();
 void rearrange_interfaces_map();
 void update_interfaces_map(unsigned int phy_index, unsigned int interface_radio_index);
 void update_interface_names(unsigned int phy_index, char *interface_name);
 #endif
 
+int _syscmd(char *cmd, char *retBuf, int retBufSize);
 static inline enum nl80211_iftype wpa_driver_nl80211_if_type(enum wpa_driver_if_type type)
 {
     switch (type) {

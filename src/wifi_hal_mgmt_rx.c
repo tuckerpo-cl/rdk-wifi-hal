@@ -22,7 +22,10 @@
 #include "ieee80211.h"
 
 const char dpp_oui[3] = {0x50, 0x6f, 0x9a};
+
+#if !defined(PLATFORM_LINUX)
 #define printf wifi_dpp_dbg_print
+#endif
 
 int handle_assoc_rsp_frame(INT ap_index, mac_address_t sta_mac, unsigned char *frame, UINT len) 
 {
@@ -89,7 +92,9 @@ int handle_gas_init_public_action_frame(INT ap_index, mac_address_t sta_mac, uns
 			if ((adv_tuple->len == sizeof(dpp_oui) + 2) && (memcmp(adv_tuple->oui, dpp_oui, sizeof(dpp_oui)) == 0) && 
 					(*(adv_tuple->oui + sizeof(dpp_oui)) == DPP_OUI_TYPE) && (*(adv_tuple->oui + sizeof(dpp_oui) + 1) == DPP_CONFPROTO)) {
 				printf("%s:%d dpp gas initial req frame received callback, length:%d\n", __func__, __LINE__, query_len);
+#if !defined(PLATFORM_LINUX)
    				callback_dpp_config_req_frame_received(ap_index, sta_mac, pgas_req->token, query_req, query_len);
+#endif
 
 			}
 			break;
@@ -116,7 +121,9 @@ int handle_vendor_public_action_frame(INT ap_index, mac_address_t sta_mac, unsig
 	if ((frame != NULL) && (memcmp(frame_oui->oui, dpp_oui, sizeof(dpp_oui)) == 0) 
 				&& (frame_oui->oui_type == DPP_OUI_TYPE)) {
       	printf("%s:%d callback_dpp_auth_frame_received, length:%d\n", __func__, __LINE__, len);
+#if !defined(PLATFORM_LINUX)
        	callback_dpp_public_action_frame_received(ap_index, sta_mac, (wifi_dppPublicActionFrameBody_t*)public_action_data, len);
+#endif
     } else {
 		// not dpp frame
 	}

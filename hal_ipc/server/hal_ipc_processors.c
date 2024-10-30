@@ -76,7 +76,6 @@ int ipc_server_output(struct hal_ipc_processor_desc *desc,
     int got_radio_index = 0;
     CHAR* output_string;
     wifi_associated_dev3_t *associated_dev_array;
-    wifi_steering_clientConfig_t *config;
     UINT req_ies_size_out = 0;
 
     wifi_hal_dbg_print("%s:%d Enter: executing %s api in server\n", __func__, __LINE__, desc->name);
@@ -193,10 +192,13 @@ int ipc_server_output(struct hal_ipc_processor_desc *desc,
 
             for (int index = 0; index < array_size; index++) {
                 chan_stats_tmp = &input_output_channelStats_array[index];
-                wifi_hal_info_print("%s:%d array_size:%d,index:%d,Channel number :%d busyTx:%llu busyrx:%llu, ch_in_pool:%d ch_noise:%d ch_utilization:%d ch_utilization_total:%llu\n", __func__,
-                        __LINE__, array_size, index, chan_stats_tmp->ch_number, chan_stats_tmp->ch_utilization_busy_tx,
-                        chan_stats_tmp->ch_utilization_busy_rx, chan_stats_tmp->ch_in_pool, chan_stats_tmp->ch_noise,
-                        chan_stats_tmp->ch_utilization, chan_stats_tmp->ch_utilization_total);
+                wifi_hal_dbg_print(
+                    "%s:%d array_size:%d,index:%d,Channel number :%d busyTx:%llu busyrx:%llu, "
+                    "ch_in_pool:%d ch_noise:%d ch_utilization:%d ch_utilization_total:%llu\n",
+                    __func__, __LINE__, array_size, index, chan_stats_tmp->ch_number,
+                    chan_stats_tmp->ch_utilization_busy_tx, chan_stats_tmp->ch_utilization_busy_rx,
+                    chan_stats_tmp->ch_in_pool, chan_stats_tmp->ch_noise,
+                    chan_stats_tmp->ch_utilization, chan_stats_tmp->ch_utilization_total);
             }
 
             // allocate new memory for server's output data
@@ -841,26 +843,21 @@ int ipc_server_output(struct hal_ipc_processor_desc *desc,
 
         case hal_ipc_desc_type_steering_client_set:
 
-            config = (wifi_steering_clientConfig_t*) malloc(sizeof(wifi_steering_clientConfig_t));
-
             desc->ret = wifi_hal_steering_clientSet(desc->in.set_steering_client.steering_group_index,
                                                     desc->in.set_steering_client.ap_index,
                                                     desc->in.set_steering_client.client_mac,
-                                                    config);
+                                                    &desc->in.set_steering_client.config);
             if (desc->ret) {
                 wifi_hal_error_print("%s:%d FAIL call to %s returned %d code\n", __func__, __LINE__, desc->name, desc->ret);
-                free(config);
                 goto error_happened;
             }
 
             if (!memcpy((unsigned char*) &desc->out.set_steering_client.config,
-                       (unsigned char*) config,
+                       (unsigned char*) &desc->in.set_steering_client.config,
                        sizeof(wifi_steering_clientConfig_t))) {
                 wifi_hal_error_print("%s:%d FAIL memcpy %s steering client set config for AP index %d\n", __func__, __LINE__, desc->name, desc->in.set_steering_client.ap_index);
-                free(config);
                 goto error_happened;
             }
-            free(config);
             break;
 
         case hal_ipc_desc_type_steering_client_remove:

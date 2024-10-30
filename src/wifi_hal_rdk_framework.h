@@ -37,7 +37,8 @@
 #include <openssl/bn.h>
 #include <openssl/ec.h>
 #include "wifi_hal_rdk.h"
-
+#include <sys/time.h>
+#include <pthread.h>
 struct rtnl_handle
 {
     int         fd;

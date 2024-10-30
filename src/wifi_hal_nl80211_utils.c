@@ -37,13 +37,22 @@
 #include <netlink/genl/genl.h>
 #include "wifi_hal.h"
 #include "wifi_hal_priv.h"
+#include <cjson/cJSON.h>
 
 #ifdef CONFIG_WIFI_EMULATOR
 #define MAX_CLIENTS 3
-wifi_interface_name_idex_map_t *interface_index_map = NULL;
+static wifi_interface_name_idex_map_t *interface_index_map = NULL;
 #else
-wifi_interface_name_idex_map_t interface_index_map[] = {
+#define INTERFACE_MAP_JSON "/nvram/InterfaceMap.json"
+
+static const wifi_interface_name_idex_map_t *interface_index_map;
+static unsigned int interface_index_map_size;
+
+static const wifi_interface_name_idex_map_t static_interface_index_map[] = {
 #ifdef RASPBERRY_PI_PORT
+#if defined(PLATFORM_LINUX)
+    {0, 0,  "wlan0",     "brlan0",    0,    0,     "private_ssid_2g"},
+#else
     {0, 0,  "wlan0",     "brlan0",    0,    0,     "private_ssid_2g"},
     {1, 1,  "wlan1",     "brlan0",    0,    1,      "private_ssid_5g"},
     {0, 0,  "wlan2",     "brlan1",    0,    2,      "iot_ssid_2g"},
@@ -60,6 +69,7 @@ wifi_interface_name_idex_map_t interface_index_map[] = {
     {1, 1,  "wlan13",    "brlan3",    0,    13,     "mesh_backhaul_5g"},
     {0, 0,  "wlan14",    "brlan2",    0,    14,     "mesh_sta_2g"},
     {1, 1,  "wlan15",    "brlan2",    0,    15,     "mesh_sta_5g"},
+#endif
 #endif
 
 #ifdef TCXB7_PORT // for Broadcom based platforms
@@ -292,7 +302,9 @@ wifi_interface_name_idex_map_t interface_index_map[] = {
 #ifdef CONFIG_WIFI_EMULATOR
 static radio_interface_mapping_t *l_radio_interface_map = NULL;
 #else
-static radio_interface_mapping_t l_radio_interface_map[] = {
+static const radio_interface_mapping_t *l_radio_interface_map;
+static unsigned int l_radio_interface_map_size;
+static const radio_interface_mapping_t static_radio_interface_map[] = {
 #if defined(TCXB7_PORT) || defined(SKYSR213_PORT) || defined(TCHCBRV2_PORT)
     { 0, 0, "radio1", "wl0"},
     { 1, 1, "radio2", "wl1"},
@@ -333,8 +345,12 @@ static radio_interface_mapping_t l_radio_interface_map[] = {
 #endif
 
 #ifdef RASPBERRY_PI_PORT
+#if !defined(PLATFORM_LINUX)
     { 0, 0, "radio1", "wlan0"},
     { 1, 1, "radio2", "wlan1"},
+#else
+    { 0, 0, "radio1", "wlan0"},
+#endif
 #endif
 };
 #endif
@@ -996,10 +1012,10 @@ wifi_country_radio_op_class_t other_op_class = {
     }
 };
 
-int get_sizeof_interfaces_index_map() {
+static unsigned int get_sizeof_interfaces_index_map(void) {
 #ifdef CONFIG_WIFI_EMULATOR
-    int count = 0;
-    wifi_interface_name_idex_map_t *tmp_interface_index_map = interface_index_map;
+    unsigned int count = 0;
+    const wifi_interface_name_idex_map_t *tmp_interface_index_map = interface_index_map;
     for(count = 0;(tmp_interface_index_map != NULL);) {
         if (strstr(tmp_interface_index_map->vap_name, "sta")) {
             tmp_interface_index_map++;
@@ -1010,14 +1026,14 @@ int get_sizeof_interfaces_index_map() {
     }
     return count;
 #else
-    return (sizeof(interface_index_map)/sizeof(wifi_interface_name_idex_map_t));
+    return interface_index_map_size;
 #endif
 }
 
-int get_sizeof_radio_interfaces_map()
+static unsigned int get_sizeof_radio_interfaces_map(void)
 {
 #ifdef CONFIG_WIFI_EMULATOR
-    int count = 0;
+    unsigned int count = 0;
     radio_interface_mapping_t *tmp_radio_interface_map = l_radio_interface_map;
     for(count = 0;(tmp_radio_interface_map != NULL);) {
         if (strstr(tmp_radio_interface_map->radio_name, "radio")) {
@@ -1029,7 +1045,7 @@ int get_sizeof_radio_interfaces_map()
     }
     return count;
 #else
-    return (sizeof(l_radio_interface_map)/sizeof(radio_interface_mapping_t));
+    return l_radio_interface_map_size;
 #endif
 }
 
@@ -1259,7 +1275,7 @@ int get_interface_name_from_radio_index(uint8_t radio_index, char *interface_nam
 
 int get_rdk_radio_index(unsigned int phy_index)
 {
-    wifi_interface_name_idex_map_t *map;
+    const wifi_interface_name_idex_map_t *map;
     unsigned int i;
     for (i = 0; i < get_sizeof_interfaces_index_map(); i++) {
         map = &interface_index_map[i];
@@ -1285,8 +1301,8 @@ void get_wifi_interface_info_map(wifi_interface_name_idex_map_t *interface_map)
 
 int get_ap_vlan_id(char *interface_name)
 {
-    int i = 0;
-    wifi_interface_name_idex_map_t *map = NULL;
+    unsigned int i = 0;
+    const wifi_interface_name_idex_map_t *map = NULL;
     for (i = 0; i < get_sizeof_interfaces_index_map(); i++) {
         map = &interface_index_map[i];
         if ((strcmp(interface_name, map->interface_name) == 0))  {
@@ -1378,6 +1394,7 @@ wifi_interface_info_t *wifi_hal_get_vap_interface_by_type(wifi_radio_info_t *rad
     return NULL;
 }
 
+#if !defined(PLATFORM_LINUX)
 int getIpStringFromAdrress (char * ipString, ip_addr_t * ip)
 {
     if (ip->family == wifi_ip_family_ipv4) {
@@ -1394,12 +1411,12 @@ int getIpStringFromAdrress (char * ipString, ip_addr_t * ip)
 
     return 1;
 }
-
+#endif
 
 int set_interface_properties(unsigned int phy_index, wifi_interface_info_t *interface)
 {
-    wifi_interface_name_idex_map_t *map;
-    radio_interface_mapping_t *radio_map;
+    const wifi_interface_name_idex_map_t *map;
+    const radio_interface_mapping_t *radio_map;
     wifi_vap_info_t *vap;
     unsigned int i;
 
@@ -1439,7 +1456,7 @@ int get_interface_name_from_vap_index(unsigned int vap_index, char *interface_na
     // OneWifi interafce mapping with vap_index
     unsigned char l_index = 0;
     unsigned char total_num_of_vaps = 0;
-    char *l_interface_name = NULL;
+    const char *l_interface_name = NULL;
     wifi_radio_info_t *radio;
 
     for (l_index = 0; l_index < g_wifi_hal.num_radios; l_index++) {
@@ -1796,6 +1813,8 @@ int get_security_encryption_mode_str_from_int(wifi_encryption_method_t encryptio
                 const wifi_security_modes_t security_mode = interface->vap_info.u.bss_info.security.mode;
                 switch (security_mode) {
                     case wifi_security_mode_none:
+                    case wifi_security_mode_wpa_wpa2_personal:
+                    case wifi_security_mode_wpa2_personal:
                     case wifi_security_mode_wpa_enterprise:
                     case wifi_security_mode_wpa2_enterprise:
                     case wifi_security_mode_wpa_wpa2_enterprise:
@@ -3402,8 +3421,111 @@ int wifi_bitrate_to_str(char *dest, size_t dest_size, wifi_bitrate_t bitrate)
         "", (int)bitrate);
 }
 
+/* return AP-config pointer as well as group index */
+wifi_steering_apConfig_t* steering_find_ap_cfg(int vap_index, uint32_t *g_idx)
+{
+    int i, j;
+    wifi_bm_steering_group_t      *g_ptr;
+    wifi_bm_steering_group_info_t *g_info;
+
+    for (i = 0; i < MAX_STEERING_GROUP_NUM; i++)
+    {
+        g_ptr = &g_wifi_hal.bm_steer_groups[i];
+
+        if (!g_ptr->group_enable) {
+            continue;
+        }
+
+        for (j = 0; j < MAX_NUM_RADIOS; j++) {
+            g_info = &g_ptr->bm_group_info[j];
+
+            if (g_info->config.apIndex == vap_index) {
+                *g_idx = g_ptr->group_index;
+                wifi_hal_dbg_print("%s:%d: found group index %d for ap_index:%d\n", __func__, __LINE__, g_ptr->group_index, vap_index);
+                return &g_info->config;
+            }
+        }
+    }
+    return NULL;
+}
+
+int wifi_steering_add_mac_list(uint32_t vap_index, bm_sta_list_t *sta_info)
+{
+    mac_addr_str_t sta_mac_str;
+    char *key;
+    int ret;
+
+    sta_info->is_acl_set = true;
+    /* re-configure macmode etc. in case the run-time setting is cleared by ApplySetting */
+    /* Macfilter deny mode set */
+    ret = steering_set_acl_mode(vap_index, wifi_mac_filter_mode_black_list);
+    if (ret != RETURN_OK)
+    {
+        return ret;
+    }
+
+    key = to_mac_str(sta_info->mac_addr, sta_mac_str);
+    ret = wifi_hal_addApAclDevice(vap_index, key);
+
+    wifi_hal_info_print("status:%d: add sta:%s to maclist on vap_index:%d\n", ret, key, vap_index);
+    return ret;
+}
+
+int wifi_steering_del_mac_list(uint32_t vap_index, bm_sta_list_t *sta_info)
+{
+    int ret;
+    mac_addr_str_t sta_mac_str;
+    char *key;
+
+    key = to_mac_str(sta_info->mac_addr, sta_mac_str);
+    if (sta_info->is_acl_set != true) {
+        wifi_hal_error_print("steering mac filter acl is not configured for sta:%s on vap_index:%d\n", key, vap_index);
+        return RETURN_ERR;
+    }
+
+    ret = wifi_hal_delApAclDevice(vap_index, key);
+
+    sta_info->is_acl_set = false;
+    wifi_hal_info_print("status:%d del sta:%s from maclist on vap_index:%d\n", ret, key, vap_index);
+    return ret;
+}
+
+void re_configure_steering_mac_list(wifi_interface_info_t *interface)
+{
+    wifi_vap_info_t *vap;
+    bm_sta_list_t *ptr = NULL;
+    mac_addr_str_t sta_mac_str;
+    char *key;
+
+    vap = &interface->vap_info;
+    if (vap->vap_mode != wifi_vap_mode_ap) {
+        wifi_hal_info_print("%s:%d: sta vap:%d does not support this\n", __func__, __LINE__, vap->vap_index);
+        return;
+    } else if((vap->u.bss_info.mac_filter_enable == true) &&
+                (vap->u.bss_info.mac_filter_mode != wifi_mac_filter_mode_black_list)) {
+        wifi_hal_info_print("%s:%d: mac mode:%d for vap:%d\n", __func__, __LINE__, vap->u.bss_info.mac_filter_mode, vap->vap_index);
+        return;
+    }
+
+    pthread_mutex_lock(&g_wifi_hal.steering_data_lock);
+    ptr = hash_map_get_first(interface->bm_sta_map);
+    while (ptr != NULL) {
+        if ((ptr->is_acl_set == true) && (ptr->vap_index == vap->vap_index)) {
+            if (vap->u.bss_info.mac_filter_enable == false) {
+                /* Inside this function, If mac filter is not enabled.
+                 *  So, Forcefully we will enable mac filter and macmode */
+                steering_set_acl_mode(vap->vap_index, wifi_mac_filter_mode_black_list);
+            }
+            key = to_mac_str(ptr->mac_addr, sta_mac_str);
+            wifi_hal_addApAclDevice(ptr->vap_index, key);
+        }
+        ptr = hash_map_get_next(interface->bm_sta_map, ptr);
+    }
+    pthread_mutex_unlock(&g_wifi_hal.steering_data_lock);
+}
+
 #ifdef CONFIG_WIFI_EMULATOR
-void init_interface_map()
+void init_interface_map(void)
 {
     interface_index_map = (wifi_interface_name_idex_map_t *)malloc(sizeof(wifi_interface_name_idex_map_t)*MAX_CLIENTS);
     if (interface_index_map != NULL) {
@@ -3513,5 +3635,350 @@ void rearrange_interfaces_map()
     
     return;
 }
-#endif
+#else
+static inline cJSON *json_open_interface_map(FILE *fp, size_t len)
+{
+    cJSON *json;
+    char *buff;
 
+    buff = malloc(len);
+    if (buff == NULL) {
+        wifi_hal_error_print("%s:%d: Failed to allocate %zu bytes for json file\n", __func__,
+            __LINE__, len);
+        return NULL;
+    }
+
+    len = fread(buff, 1, len, fp);
+
+    json = cJSON_ParseWithLength(buff, len);
+    if (json == NULL) {
+        const char *const error_ptr = cJSON_GetErrorPtr();
+        wifi_hal_error_print("%s:%d: Error json file parse: %s\n", __func__, __LINE__,
+            (error_ptr ? error_ptr : "UNKNOWN"));
+    }
+
+    free(buff);
+
+    return json;
+}
+
+static inline int json_parse_interface_map(cJSON *json)
+{
+    cJSON *phy_list;
+    cJSON *phy_index;
+    cJSON *phy_elm;
+    cJSON *radio_list;
+    cJSON *radio_elm;
+    cJSON *radio_index;
+    cJSON *radio_name;
+    cJSON *inteface_list;
+    cJSON *interface_elm;
+    cJSON *interface_name;
+    cJSON *bridge;
+    cJSON *vlan_id;
+    cJSON *vap_index;
+    cJSON *vap_name;
+    wifi_interface_name_idex_map_t *tmp_intf_idx_map;
+    radio_interface_mapping_t *tmp_radio_interface_map;
+    unsigned int radio_interface_map_size;
+    unsigned int interface_idx_map_size;
+    unsigned int r_idx;
+    unsigned int i_idx;
+    cJSON_bool valid;
+
+    phy_list = cJSON_GetObjectItem(json, "PhyList");
+    if (!cJSON_IsArray(phy_list)) {
+        wifi_hal_error_print("%s:%d: [PhyList] does not exist or is not an array\n", __func__,
+            __LINE__);
+        return -1;
+    }
+
+    radio_interface_map_size = 0;
+    interface_idx_map_size = 0;
+
+    cJSON_ArrayForEach(phy_elm, phy_list)
+    {
+        phy_index = cJSON_GetObjectItem(phy_elm, "Index");
+        if (!(valid = cJSON_IsNumber(phy_index))) {
+            wifi_hal_error_print("%s:%d: (Index) does not exist or is not a number\n", __func__,
+                __LINE__);
+            break;
+        }
+
+        radio_list = cJSON_GetObjectItem(phy_elm, "RadioList");
+        if (!(valid = cJSON_IsArray(radio_list))) {
+            wifi_hal_error_print("%s:%d: [RadioList] does not exist or is not an array\n", __func__,
+                __LINE__);
+            break;
+        }
+
+        cJSON_ArrayForEach(radio_elm, radio_list)
+        {
+            radio_index = cJSON_GetObjectItem(radio_elm, "Index");
+            if (!(valid = cJSON_IsNumber(radio_index))) {
+                wifi_hal_error_print("%s:%d: (Index) does not exist "
+                                     "or is not a number\n",
+                    __func__, __LINE__);
+                break;
+            }
+
+            radio_name = cJSON_GetObjectItem(radio_elm, "RadioName");
+            if (!(valid = cJSON_IsString(radio_name))) {
+                wifi_hal_error_print("%s:%d: (RadioName) does not exist "
+                                     "or is not a string\n",
+                    __func__, __LINE__);
+                break;
+            }
+
+            inteface_list = cJSON_GetObjectItem(radio_elm, "InterfaceList");
+            if (!(valid = cJSON_IsArray(inteface_list))) {
+                wifi_hal_error_print("%s:%d: [InterfaceList] does "
+                                     "not exist or is not an array\n",
+                    __func__, __LINE__);
+                break;
+            }
+
+            cJSON_ArrayForEach(interface_elm, inteface_list)
+            {
+                interface_name = cJSON_GetObjectItem(interface_elm, "InterfaceName");
+                if (!(valid = cJSON_IsString(interface_name))) {
+                    wifi_hal_error_print("%s:%d: (InterfaceName) does "
+                                         "not exist or is not a string\n",
+                        __func__, __LINE__);
+                    break;
+                }
+
+                bridge = cJSON_GetObjectItem(interface_elm, "Bridge");
+                if (!(valid = cJSON_IsString(bridge))) {
+                    wifi_hal_error_print("%s:%d: (Bridge) does "
+                                         "not exist or is not a string\n",
+                        __func__, __LINE__);
+                    break;
+                }
+
+                vlan_id = cJSON_GetObjectItem(interface_elm, "vlanId");
+                if (!(valid = cJSON_IsNumber(vlan_id))) {
+                    wifi_hal_error_print("%s:%d: (vlanId) does "
+                                         "not exist or is not a number\n",
+                        __func__, __LINE__);
+                    break;
+                }
+
+                vap_index = cJSON_GetObjectItem(interface_elm, "vapIndex");
+                if (!(valid = cJSON_IsNumber(vap_index))) {
+                    wifi_hal_error_print("%s:%d: (vapIndex) does "
+                                         "not exist or is not a number\n",
+                        __func__, __LINE__);
+                    break;
+                }
+
+                vap_name = cJSON_GetObjectItem(interface_elm, "vapName");
+                if (!(valid = cJSON_IsString(vap_name))) {
+                    wifi_hal_error_print("%s:%d: (vapName) does "
+                                         "not exist or is not a string\n",
+                        __func__, __LINE__);
+                    break;
+                }
+                interface_idx_map_size++;
+            }
+            if (!valid) {
+                wifi_hal_error_print("%s:%d: Failed to [InterfaceList] validation\n", __func__,
+                    __LINE__);
+                break;
+            }
+            radio_interface_map_size++;
+        }
+        if (!valid) {
+            wifi_hal_error_print("%s:%d: Failed to [RadioList] validation\n", __func__, __LINE__);
+            break;
+        }
+    }
+    if (!valid) {
+        wifi_hal_error_print("%s:%d: Failed to [PhyList] validation\n", __func__, __LINE__);
+        return -1;
+    }
+
+    tmp_intf_idx_map = NULL;
+    tmp_radio_interface_map = NULL;
+
+    if (!((tmp_intf_idx_map = malloc(sizeof(*tmp_intf_idx_map) * interface_idx_map_size)) &&
+            (tmp_radio_interface_map = malloc(
+                 sizeof(*tmp_radio_interface_map) * radio_interface_map_size)))) {
+        wifi_hal_error_print("%s:%d: Failed to allocate interface_idx_map(%d - %u "
+                             "bytes) or radio_interface_map_size(%d - %u bytes)\n",
+            __func__, __LINE__, !!tmp_intf_idx_map, interface_idx_map_size,
+            !!tmp_radio_interface_map, radio_interface_map_size);
+
+        free(tmp_radio_interface_map);
+        free(tmp_intf_idx_map);
+
+        return -1;
+    }
+
+    // filling occurs from the end
+    i_idx = interface_idx_map_size - 1;
+    r_idx = radio_interface_map_size - 1;
+
+    cJSON_ArrayForEach(phy_elm, phy_list)
+    {
+        phy_index = cJSON_GetObjectItem(phy_elm, "Index");
+        radio_list = cJSON_GetObjectItem(phy_elm, "RadioList");
+
+        cJSON_ArrayForEach(radio_elm, radio_list)
+        {
+            radio_index = cJSON_GetObjectItem(radio_elm, "Index");
+            radio_name = cJSON_GetObjectItem(radio_elm, "RadioName");
+            inteface_list = cJSON_GetObjectItem(radio_elm, "InterfaceList");
+
+            tmp_radio_interface_map[r_idx].phy_index = (unsigned int)cJSON_GetNumberValue(
+                phy_index);
+            tmp_radio_interface_map[r_idx].radio_index = (unsigned int)cJSON_GetNumberValue(
+                radio_index);
+
+            snprintf(tmp_radio_interface_map[r_idx].radio_name,
+                sizeof(tmp_radio_interface_map[r_idx].radio_name), "radio%u",
+                tmp_radio_interface_map[r_idx].radio_index + 1);
+
+            strncpy(tmp_radio_interface_map[r_idx].interface_name, cJSON_GetStringValue(radio_name),
+                (sizeof(tmp_radio_interface_map[r_idx].interface_name) /
+                    sizeof(*tmp_radio_interface_map[r_idx].interface_name)) -
+                    1);
+            tmp_radio_interface_map[r_idx]
+                .interface_name[(sizeof(tmp_radio_interface_map[r_idx].interface_name) /
+                                    sizeof(*tmp_radio_interface_map[r_idx].interface_name)) -
+                    1] = '\0';
+
+            cJSON_ArrayForEach(interface_elm, inteface_list)
+            {
+                interface_name = cJSON_GetObjectItem(interface_elm, "InterfaceName");
+                bridge = cJSON_GetObjectItem(interface_elm, "Bridge");
+                vlan_id = cJSON_GetObjectItem(interface_elm, "vlanId");
+                vap_index = cJSON_GetObjectItem(interface_elm, "vapIndex");
+                vap_name = cJSON_GetObjectItem(interface_elm, "vapName");
+
+                tmp_intf_idx_map[i_idx].phy_index = tmp_radio_interface_map[r_idx].phy_index;
+
+                tmp_intf_idx_map[i_idx].rdk_radio_index =
+                    tmp_radio_interface_map[r_idx].radio_index;
+
+                strncpy(tmp_intf_idx_map[i_idx].interface_name,
+                    cJSON_GetStringValue(interface_name),
+                    (sizeof(tmp_intf_idx_map[i_idx].interface_name) /
+                        sizeof(*tmp_intf_idx_map[i_idx].interface_name)) -
+                        1);
+                tmp_intf_idx_map[i_idx]
+                    .interface_name[(sizeof(tmp_intf_idx_map[i_idx].interface_name) /
+                                        sizeof(*tmp_intf_idx_map[i_idx].interface_name)) -
+                        1] = '\0';
+
+                strncpy(tmp_intf_idx_map[i_idx].bridge_name, cJSON_GetStringValue(bridge),
+                    (sizeof(tmp_intf_idx_map[i_idx].bridge_name) /
+                        sizeof(*tmp_intf_idx_map[i_idx].bridge_name)) -
+                        1);
+                tmp_intf_idx_map[i_idx]
+                    .bridge_name[(sizeof(tmp_intf_idx_map[i_idx].bridge_name) /
+                                     sizeof(*tmp_intf_idx_map[i_idx].bridge_name)) -
+                        1] = '\0';
+
+                tmp_intf_idx_map[i_idx].vlan_id = (unsigned int)cJSON_GetNumberValue(vlan_id);
+
+                tmp_intf_idx_map[i_idx].index = (unsigned int)cJSON_GetNumberValue(vap_index);
+
+                strncpy(tmp_intf_idx_map[i_idx].vap_name, cJSON_GetStringValue(vap_name),
+                    (sizeof(tmp_intf_idx_map[i_idx].vap_name) /
+                        sizeof(*tmp_intf_idx_map[i_idx].vap_name)) -
+                        1);
+                tmp_intf_idx_map[i_idx].vap_name[(sizeof(tmp_intf_idx_map[i_idx].vap_name) /
+                                                     sizeof(*tmp_intf_idx_map[i_idx].vap_name)) -
+                    1] = '\0';
+                i_idx--;
+            }
+            r_idx--;
+        }
+    }
+    interface_index_map = tmp_intf_idx_map;
+    interface_index_map_size = interface_idx_map_size;
+
+    l_radio_interface_map = tmp_radio_interface_map;
+    l_radio_interface_map_size = radio_interface_map_size;
+
+    return 0;
+}
+
+static inline int init_json_interface_map(void)
+{
+    FILE *fp;
+    cJSON *json;
+    size_t len;
+    int ret;
+
+    fp = fopen(INTERFACE_MAP_JSON, "r");
+    if (fp == NULL) {
+        wifi_hal_error_print("%s:%d: Failed (err=%d, msg=%s) to opening interface map file:%s\n",
+            __func__, __LINE__, errno, strerror(errno), INTERFACE_MAP_JSON);
+        return -1;
+    }
+
+    fseek(fp, 0, SEEK_END);
+    len = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    ret = -1;
+
+    json = json_open_interface_map(fp, len);
+    if (json) {
+        ret = json_parse_interface_map(json);
+
+        cJSON_Delete(json);
+    }
+
+    fclose(fp);
+
+    return ret;
+}
+
+static inline void init_static_interface_map(void)
+{
+    interface_index_map = static_interface_index_map;
+    interface_index_map_size = (sizeof(static_interface_index_map) /
+        sizeof(*static_interface_index_map));
+
+    l_radio_interface_map = static_radio_interface_map;
+    l_radio_interface_map_size = (sizeof(static_radio_interface_map) /
+        sizeof(*static_radio_interface_map));
+}
+
+void init_interface_map(void)
+{
+    unsigned int i;
+    int json_ret;
+
+    json_ret = init_json_interface_map();
+    if (json_ret < 0) {
+        init_static_interface_map();
+    }
+
+    wifi_hal_info_print("%s:%d: Using %s Interface Map\n", __func__, __LINE__,
+        ((json_ret < 0) ? "STATIC" : "JSON"));
+
+    wifi_hal_info_print("%s:%d: Interface Index Map(%u):\n", __func__, __LINE__,
+        interface_index_map_size);
+    for (i = 0; i < interface_index_map_size; i++) {
+        wifi_hal_info_print("\t[%u]={phy_index:%u, rdk_radio_index:%u, interface_name:%s, "
+                            "bridge_name:%s, vlan_id:%d, index:%u, vap_name:%s}\n",
+            i, interface_index_map[i].phy_index, interface_index_map[i].rdk_radio_index,
+            interface_index_map[i].interface_name, interface_index_map->bridge_name,
+            interface_index_map[i].vlan_id, interface_index_map[i].index,
+            interface_index_map[i].vap_name);
+    }
+
+    wifi_hal_info_print("%s:%d: Radio Interface Index Map(%u):\n", __func__, __LINE__,
+        l_radio_interface_map_size);
+    for (i = 0; i < l_radio_interface_map_size; i++) {
+        wifi_hal_info_print("\t[%u]={phy_index:%u, radio_index:%u, radio_name:%s, "
+                            "interface_name:%s}\n",
+            i, l_radio_interface_map[i].phy_index, l_radio_interface_map[i].radio_index,
+            l_radio_interface_map[i].radio_name, l_radio_interface_map[i].interface_name);
+    }
+}
+#endif /* CONFIG_WIFI_EMULATOR */

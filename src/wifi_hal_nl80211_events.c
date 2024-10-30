@@ -298,9 +298,11 @@ static void nl80211_frame_tx_status_event(wifi_interface_info_t *interface, stru
             pthread_mutex_lock(&g_wifi_hal.hapd_lock);
             station = ap_get_sta(&interface->u.ap.hapd, sta);
             if (station) {
+#if !defined(PLATFORM_LINUX)
                 if (station->disconnect_reason_code == WLAN_RADIUS_GREYLIST_REJECT) {
                     reason = station->disconnect_reason_code;
                 }
+#endif
                 ap_free_sta(&interface->u.ap.hapd, station);
             }
             pthread_mutex_unlock(&g_wifi_hal.hapd_lock);
@@ -340,10 +342,12 @@ static void nl80211_frame_tx_status_event(wifi_interface_info_t *interface, stru
             pthread_mutex_lock(&g_wifi_hal.hapd_lock);
             station = ap_get_sta(&interface->u.ap.hapd, sta);
             if (station) {
+#if !defined(PLATFORM_LINUX)
                 if (station->disconnect_reason_code == WLAN_RADIUS_GREYLIST_REJECT) {
                     reason = station->disconnect_reason_code;
                     wifi_hal_info_print("reason from disconnect reason code is %d\n",reason);
                 }
+#endif
                 ap_free_sta(&interface->u.ap.hapd, station);
             }
             pthread_mutex_unlock(&g_wifi_hal.hapd_lock);
@@ -642,15 +646,54 @@ bool is_channel_supported_on_radio(wifi_freq_bands_t l_band, unsigned int channe
     return false;
 }
 
+static void ch_switch_update_hostap_config(wifi_radio_info_t *radio, u8 channel, int op_class,
+    int freq, int cf1, int cf2, int hostap_channel_width, int hal_channel_width)
+{
+    u8 seg0_idx = 0, seg1_idx = 0;
+    struct hostapd_config *iconf = &radio->iconf;
+
+    pthread_mutex_lock(&g_wifi_hal.hapd_lock);
+
+    iconf->channel = channel;
+#if HOSTAPD_VERSION >= 210
+    iconf->op_class = op_class;
+#endif
+    iconf->secondary_channel = get_sec_channel_offset(radio, freq);
+    ieee80211_freq_to_chan(cf1, &seg0_idx);
+    ieee80211_freq_to_chan(cf2, &seg1_idx);
+    hostapd_set_oper_centr_freq_seg0_idx(iconf, seg0_idx);
+    hostapd_set_oper_centr_freq_seg1_idx(iconf, seg1_idx);
+    hostapd_set_oper_chwidth(iconf, hostap_channel_width);
+
+#ifdef CONFIG_IEEE80211AX
+#if HOSTAPD_VERSION >= 210
+    if (radio->oper_param.band == WIFI_FREQUENCY_2_4_BAND) {
+        iconf->he_2ghz_40mhz_width_allowed = hal_channel_width == WIFI_CHANNELBANDWIDTH_40MHZ;
+    }
+#endif
+#endif
+
+    iconf->ht_capab &= ~HT_CAP_INFO_SUPP_CHANNEL_WIDTH_SET;
+    if (hal_channel_width >= WIFI_CHANNELBANDWIDTH_40MHZ) {
+        iconf->ht_capab |= HT_CAP_INFO_SUPP_CHANNEL_WIDTH_SET;
+    }
+
+    iconf->vht_capab &= ~VHT_CAP_SUPP_CHAN_WIDTH_MASK;
+    if (hal_channel_width == WIFI_CHANNELBANDWIDTH_160MHZ) {
+        iconf->vht_capab |= VHT_CAP_SUPP_CHAN_WIDTH_160MHZ;
+    }
+
+    pthread_mutex_unlock(&g_wifi_hal.hapd_lock);
+}
+
 static void nl80211_ch_switch_notify_event(wifi_interface_info_t *interface, struct nlattr **tb, wifi_chan_eventType_t wifi_chan_event_type)
 {
     int ifidx = 0, freq = 0, bw = NL80211_CHAN_WIDTH_20_NOHT, cf1 = 0, cf2 = 0;
     enum nl80211_channel_type ch_type = 0;
     u8 channel;
     wifi_channel_change_event_t radio_channel_param;
-    int l_channel_width, op_class;
+    int l_channel_width, hostap_channel_width, op_class;
     enum nl80211_radar_event event_type = 0;
-    u8 seg0_idx = 0, seg1_idx = 0;
     wifi_radio_info_t *radio;
 
     wifi_hal_dbg_print("%s:%d: wifi_chan_event_type: %d interface: %s\n", __func__, __LINE__,
@@ -736,27 +779,34 @@ static void nl80211_ch_switch_notify_event(wifi_interface_info_t *interface, str
     switch (bw) {
     case NL80211_CHAN_WIDTH_20:
         l_channel_width = WIFI_CHANNELBANDWIDTH_20MHZ;
+        hostap_channel_width = CHANWIDTH_USE_HT;
         break;
     case NL80211_CHAN_WIDTH_40:
         l_channel_width = WIFI_CHANNELBANDWIDTH_40MHZ;
+        hostap_channel_width = CHANWIDTH_USE_HT;
         break;
     case NL80211_CHAN_WIDTH_80:
         l_channel_width = WIFI_CHANNELBANDWIDTH_80MHZ;
+        hostap_channel_width = CHANWIDTH_80MHZ;
         break;
     case NL80211_CHAN_WIDTH_160:
         l_channel_width = WIFI_CHANNELBANDWIDTH_160MHZ;
+        hostap_channel_width = CHANWIDTH_160MHZ;
         break;
 #ifdef CONFIG_IEEE80211BE
     case NL80211_CHAN_WIDTH_320:
         l_channel_width = WIFI_CHANNELBANDWIDTH_320MHZ;
+        hostap_channel_width = CHANWIDTH_320MHZ;
         break;
 #endif /* CONFIG_IEEE80211BE */
     case NL80211_CHAN_WIDTH_80P80:
         l_channel_width = WIFI_CHANNELBANDWIDTH_80_80MHZ;
+        hostap_channel_width = CHANWIDTH_80P80MHZ;
         break;
     default:
         wifi_hal_info_print("%s:%d: unsupported ChanWidth: %d. set 20mhz default\n", __func__, __LINE__, bw);
         l_channel_width = WIFI_CHANNELBANDWIDTH_20MHZ;
+        hostap_channel_width = CHANWIDTH_USE_HT;
         break;
     }
 
@@ -781,20 +831,12 @@ static void nl80211_ch_switch_notify_event(wifi_interface_info_t *interface, str
         radio_param->channelWidth = l_channel_width;
         radio_param->op_class = op_class;
 
+        ch_switch_update_hostap_config(radio, channel, op_class, freq, cf1, cf2,
+            hostap_channel_width, l_channel_width);
+
         if (interface->vap_info.vap_mode == wifi_vap_mode_ap &&
             (interface->u.ap.hapd.csa_in_progress || interface->u.ap.hapd.iface->freq != freq)) {
             pthread_mutex_lock(&g_wifi_hal.hapd_lock);
-            if (interface->u.ap.hapd.iconf != NULL) {
-                interface->u.ap.hapd.iconf->channel = channel;
-#if HOSTAPD_VERSION >= 210
-                interface->u.ap.hapd.iconf->op_class = op_class;
-#endif
-                ieee80211_freq_to_chan(cf1, &seg0_idx);
-                ieee80211_freq_to_chan(cf2, &seg1_idx);
-                hostapd_set_oper_centr_freq_seg0_idx(interface->u.ap.hapd.iconf, seg0_idx);
-                hostapd_set_oper_centr_freq_seg1_idx(interface->u.ap.hapd.iconf, seg1_idx);
-            }
-
             if (interface->u.ap.hapd.iface != NULL) {
                 interface->u.ap.hapd.iface->freq = freq;
             }
@@ -1243,7 +1285,11 @@ static void ltq_nl80211_handle_flush_stations(wifi_interface_info_t *interface,
     interface = hash_map_get_first(radio->interface_map);
     while (interface != NULL) {
         if (interface->vap_configured)
+#ifdef MXL_WIFI
+            mxl_drv_event_flush_stations(&interface->u.ap.hapd, data, len);
+#else
             drv_event_ltq_flush_stations(&interface->u.ap.hapd, data, len);
+#endif
 
         interface = hash_map_get_next(radio->interface_map, interface);
     }
