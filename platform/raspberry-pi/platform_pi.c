@@ -354,7 +354,6 @@ static int get_sta_list_handler(struct nl_msg *msg, void *arg)
 
     nla_parse(tb, NL80211_ATTR_MAX, attrs, len, NULL);
     if (tb[NL80211_ATTR_MAC]) {
-        unsigned char *mac = nla_data(tb[NL80211_ATTR_MAC]);
         sta_list->macs = realloc(sta_list->macs, (sta_list->num + 1) * sizeof(mac_address_t));
         if (sta_list->macs) {
             memcpy(sta_list->macs[sta_list->num], nla_data(tb[NL80211_ATTR_MAC]), sizeof(mac_address_t));
