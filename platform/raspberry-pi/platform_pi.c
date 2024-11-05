@@ -1,3 +1,32 @@
+/************************************************************************************
+  If not stated otherwise in this file or this component's LICENSE file the
+  following copyright and licenses apply:
+
+  Copyright 2024 RDK Management
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+ **************************************************************************/
+
+
+/* Adapted code from hostap, which is:
+Copyright (c) 2002-2015, Jouni Malinen j@w1.fi
+Copyright (c) 2003-2004, Instant802 Networks, Inc.
+Copyright (c) 2005-2006, Devicescape Software, Inc.
+Copyright (c) 2007, Johannes Berg johannes@sipsolutions.net
+Copyright (c) 2009-2010, Atheros Communications
+Licensed under the BSD-3 License
+*/
+
 #include <stddef.h>
 #include <string.h>
 #include <stdlib.h>
@@ -14,6 +43,10 @@
 int wifi_nvram_defaultRead(char *in,char *out);
 int _syscmd(char *cmd, char *retBuf, int retBufSize);
 
+typedef struct {
+    mac_address_t *macs;
+    unsigned int num;
+} sta_list_t;
 
 /* FIXME: VIKAS/PRAMOD:
  * If wifi_nvram_defaultRead fail, handle appropriately in callers.
@@ -338,10 +371,288 @@ INT wifi_getApDeviceRSSI(INT ap_index, CHAR *MAC, INT *output_RSSI)
     return 0;
 }
 
+
+static int get_sta_list_handler(struct nl_msg *msg, void *arg)
+{
+    struct nlattr *tb[NL80211_ATTR_MAX + 1];
+    struct genlmsghdr *gnlh = nlmsg_data(nlmsg_hdr(msg));
+    sta_list_t *sta_list = (sta_list_t *)arg;
+
+    if (nla_parse(tb, NL80211_ATTR_MAX, genlmsg_attrdata(gnlh, 0), genlmsg_attrlen(gnlh, 0),
+        NULL) < 0) {
+        wifi_hal_error_print("%s:%d Failed to parse sta data\n", __func__, __LINE__);
+        return NL_SKIP;
+    }
+
+    if (tb[NL80211_ATTR_MAC]) {
+        sta_list->macs = realloc(sta_list->macs, (sta_list->num + 1) * sizeof(mac_address_t));
+        if (sta_list->macs) {
+            memcpy(sta_list->macs[sta_list->num], nla_data(tb[NL80211_ATTR_MAC]), sizeof(mac_address_t));
+            sta_list->num++;
+        }
+    }
+
+    return NL_OK;
+}
+
+int get_sta_list(wifi_interface_info_t *interface, sta_list_t *sta_list)
+{
+    int ret, family_id;
+    struct nl_sock *sock = NULL;
+    struct nl_msg *msg = NULL;
+    struct nl_cb *cb = NULL;
+
+    sta_list->num = 0;
+
+    sock = nl_socket_alloc();
+    if (!sock) {
+        wifi_hal_error_print("%s:%d Failed to allocate netlink socket\n", __func__, __LINE__);
+        return RETURN_ERR;
+    }
+
+    ret = genl_connect(sock);
+    if (ret < 0) {
+        wifi_hal_error_print("%s:%d Failed to connect to netlink socket: %s\n", __func__, __LINE__, nl_geterror(ret));
+        nl_socket_free(sock);
+        return RETURN_ERR;
+    }
+
+    family_id = genl_ctrl_resolve(sock, "nl80211");
+    if (family_id < 0) {
+        wifi_hal_error_print("%s:%d Failed to resolve nl80211 family\n", __func__, __LINE__);
+        nl_socket_free(sock);
+        return RETURN_ERR;
+    }
+
+    msg = nlmsg_alloc();
+    if (!msg) {
+        wifi_hal_error_print("%s:%d Failed to allocate nlmsg\n", __func__, __LINE__);
+        nl_socket_free(sock);
+        return RETURN_ERR;
+    }
+
+    genlmsg_put(msg, 0, 0, family_id, 0, NLM_F_DUMP, NL80211_CMD_GET_STATION, 0);
+    nla_put_u32(msg, NL80211_ATTR_IFINDEX, interface->index);
+
+    cb = nl_cb_alloc(NL_CB_DEFAULT);
+    if (!cb) {
+        wifi_hal_error_print("%s:%d Failed to allocate callback\n", __func__, __LINE__);
+        nlmsg_free(msg);
+        nl_socket_free(sock);
+        return RETURN_ERR;
+    }
+
+    nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, get_sta_list_handler, sta_list);
+
+    ret = nl_send_auto(sock, msg);
+    if (ret < 0) {
+        wifi_hal_error_print("%s:%d Failed to send nlmsg: %s\n",  __func__, __LINE__, nl_geterror(ret));
+        nl_cb_put(cb);
+        nlmsg_free(msg);
+        nl_socket_free(sock);
+        return RETURN_ERR;
+    }
+
+    ret = nl_recvmsgs(sock, cb);
+    if (ret < 0) {
+        wifi_hal_error_print("%s:%d Failed to receive netlink messages: %s\n", __func__, __LINE__, nl_geterror(ret));
+        return RETURN_ERR;
+    }
+
+    nl_cb_put(cb);
+    nlmsg_free(msg);
+    nl_socket_free(sock);
+
+    return RETURN_OK;
+}
+
+static int get_sta_stats_handler(struct nl_msg *msg, void *arg)
+{
+    wifi_associated_dev3_t *dev = (wifi_associated_dev3_t *)arg;
+    struct nlattr *tb[NL80211_ATTR_MAX + 1];
+    struct nlattr *stats[NL80211_STA_INFO_MAX + 1];
+    struct genlmsghdr *gnlh = nlmsg_data(nlmsg_hdr(msg));
+    static struct nla_policy stats_policy[NL80211_STA_INFO_MAX + 1] = {
+                [NL80211_STA_INFO_INACTIVE_TIME] = { .type = NLA_U32 },
+                [NL80211_STA_INFO_RX_BYTES] = { .type = NLA_U32 },
+                [NL80211_STA_INFO_TX_BYTES] = { .type = NLA_U32 },
+                [NL80211_STA_INFO_RX_PACKETS] = { .type = NLA_U32 },
+                [NL80211_STA_INFO_TX_PACKETS] = { .type = NLA_U32 },
+                [NL80211_STA_INFO_TX_FAILED] = { .type = NLA_U32 },
+                [NL80211_STA_INFO_CONNECTED_TIME] = { .type = NLA_U32 },
+    };
+    struct nlattr *rate[NL80211_RATE_INFO_MAX + 1];
+    static struct nla_policy rate_policy[NL80211_RATE_INFO_MAX + 1] = {
+                [NL80211_RATE_INFO_BITRATE32] = { .type = NLA_U32 },
+    };
+    struct nl80211_sta_flag_update *sta_flags;
+
+    if (nla_parse(tb, NL80211_ATTR_MAX, genlmsg_attrdata(gnlh, 0),genlmsg_attrlen(gnlh, 0),
+        NULL) < 0) {
+        wifi_hal_error_print("%s:%d Failed to parse sta data\n", __func__, __LINE__);
+        return NL_SKIP;
+    }
+
+    if (!tb[NL80211_ATTR_STA_INFO]) {
+        wifi_hal_error_print("%s:%d Failed to get sta info attribute\n", __func__, __LINE__);
+        return NL_SKIP;
+    }
+
+    if (tb[NL80211_ATTR_MAC]) {
+        memcpy(dev->cli_MACAddress, nla_data(tb[NL80211_ATTR_MAC]), sizeof(mac_address_t));
+    }
+
+    if (nla_parse_nested(stats, NL80211_STA_INFO_MAX, tb[NL80211_ATTR_STA_INFO], stats_policy)) {
+	wifi_hal_error_print("%s:%d Failed to parse nested attributes\n", __func__, __LINE__);
+        return NL_SKIP;
+    }
+
+    if (stats[NL80211_STA_INFO_RX_BYTES]) {
+        dev->cli_BytesReceived = nla_get_u32(stats[NL80211_STA_INFO_RX_BYTES]);
+    }
+    if (stats[NL80211_STA_INFO_TX_BYTES]) {
+        dev->cli_BytesSent = nla_get_u32(stats[NL80211_STA_INFO_TX_BYTES]);
+    }
+    if (stats[NL80211_STA_INFO_RX_PACKETS]) {
+        dev->cli_PacketsReceived = nla_get_u32(stats[NL80211_STA_INFO_RX_PACKETS]);
+    }
+    if (stats[NL80211_STA_INFO_TX_PACKETS]) {
+        dev->cli_PacketsSent = nla_get_u32(stats[NL80211_STA_INFO_TX_PACKETS]);
+    }
+    if (stats[NL80211_STA_INFO_TX_FAILED]) {
+        dev->cli_ErrorsSent = nla_get_u32(stats[NL80211_STA_INFO_TX_FAILED]);
+    }
+
+    if (stats[NL80211_STA_INFO_TX_BITRATE] &&
+        nla_parse_nested(rate, NL80211_RATE_INFO_MAX, stats[NL80211_STA_INFO_TX_BITRATE], rate_policy) == 0) {
+        if (rate[NL80211_RATE_INFO_BITRATE32]){
+            dev->cli_LastDataDownlinkRate = nla_get_u32(rate[NL80211_RATE_INFO_BITRATE32]) * 100;
+        }
+    }
+    if (stats[NL80211_STA_INFO_RX_BITRATE] &&
+        nla_parse_nested(rate, NL80211_RATE_INFO_MAX, stats[NL80211_STA_INFO_RX_BITRATE], rate_policy) == 0) {
+        if (rate[NL80211_RATE_INFO_BITRATE32]) {
+                dev->cli_LastDataUplinkRate = nla_get_u32(rate[NL80211_RATE_INFO_BITRATE32]) * 100;
+        }
+    }
+
+    if (stats[NL80211_STA_INFO_STA_FLAGS]) {
+        sta_flags = nla_data(stats[NL80211_STA_INFO_STA_FLAGS]);
+        dev->cli_AuthenticationState = sta_flags->mask & (1 << NL80211_STA_FLAG_AUTHORIZED) &&
+            sta_flags->set & (1 << NL80211_STA_FLAG_AUTHORIZED);
+    }
+
+    return NL_OK;
+}
+
+int get_sta_stats(wifi_interface_info_t *interface, mac_address_t mac, wifi_associated_dev3_t *dev)
+{
+    int family_id, ret;
+    struct nl_sock *sock = NULL;
+    struct nl_msg *msg = NULL;
+    struct nl_cb *cb = NULL;
+
+    sock = nl_socket_alloc();
+    if (!sock) {
+        wifi_hal_error_print("%s:%d Failed to allocate netlink socket\n", __func__, __LINE__);
+        return RETURN_ERR;
+    }
+
+    ret = genl_connect(sock);
+    if (ret < 0) {
+        wifi_hal_error_print("%s:%d Failed to connect to netlink socket: %s\n", __func__, __LINE__, nl_geterror(ret));
+        nl_socket_free(sock);
+        return RETURN_ERR;
+    }
+
+    family_id = genl_ctrl_resolve(sock, "nl80211");
+    if (family_id < 0) {
+        wifi_hal_error_print("%s:%d Failed to resolve nl80211 family\n", __func__, __LINE__);
+        nl_socket_free(sock);
+        return RETURN_ERR;
+    }
+
+    msg = nlmsg_alloc();
+    if (!msg) {
+        wifi_hal_error_print("%s:%d Failed to allocate nlmsg\n", __func__, __LINE__);
+        nl_socket_free(sock);
+        return RETURN_ERR;
+    }
+
+    genlmsg_put(msg, 0, 0, family_id, 0, 0, NL80211_CMD_GET_STATION, 0);
+    nla_put_u32(msg, NL80211_ATTR_IFINDEX, interface->index);
+    nla_put(msg, NL80211_ATTR_MAC, sizeof(mac_address_t), mac);
+
+    cb = nl_cb_alloc(NL_CB_DEFAULT);
+    if (!cb) {
+        wifi_hal_error_print("%s:%d Failed to allocate callback\n", __func__, __LINE__);
+        nlmsg_free(msg);
+        nl_socket_free(sock);
+        return RETURN_ERR;
+    }
+
+    nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, get_sta_stats_handler, dev);
+
+    ret = nl_send_auto(sock, msg);
+    if (ret < 0) {
+        wifi_hal_error_print("%s:%d Failed to send nlmsg: %s\n", __func__, __LINE__, nl_geterror(ret));
+        nl_cb_put(cb);
+        nlmsg_free(msg);
+        nl_socket_free(sock);
+        return RETURN_ERR;
+    }
+
+    ret = nl_recvmsgs(sock, cb);
+    if (ret < 0) {
+        wifi_hal_error_print("%s:%d Failed to receive netlink messages: %s\n", __func__, __LINE__, nl_geterror(ret));
+        return RETURN_ERR;
+    }
+
+    nl_cb_put(cb);
+    nlmsg_free(msg);
+    nl_socket_free(sock);
+
+    return RETURN_OK;
+}
+
 INT wifi_getApAssociatedDeviceDiagnosticResult3(INT apIndex,
     wifi_associated_dev3_t **associated_dev_array, UINT *output_array_size)
 {
-    return 0;
+    int ret;
+    unsigned int i;
+    sta_list_t sta_list = {};
+    wifi_interface_info_t *interface;
+
+    interface = get_interface_by_vap_index(apIndex);
+    if (interface == NULL) {
+        wifi_hal_error_print("%s:%d Failed to get interface for index %d\n", __func__, __LINE__, apIndex);
+        return RETURN_ERR;
+    }
+
+    ret = get_sta_list(interface, &sta_list);
+    if (ret != 0) {
+        wifi_hal_error_print("%s:%d Failed to get sta list\n", __func__, __LINE__);
+        goto exit;
+    }
+
+    *associated_dev_array = sta_list.num ?
+        calloc(sta_list.num, sizeof(wifi_associated_dev3_t)) : NULL;
+    *output_array_size = sta_list.num;
+
+    for (i = 0; i < sta_list.num; i++) {
+        ret = get_sta_stats(interface, sta_list.macs[i], &(*associated_dev_array)[i]);
+        if (ret != RETURN_OK) {
+            wifi_hal_error_print("%s:%d Failed to get sta stats\n", __func__, __LINE__);
+            free(*associated_dev_array);
+            *associated_dev_array = NULL;
+            *output_array_size = 0;
+            goto exit;
+        }
+    }
+
+exit:
+    free(sta_list.macs);
+    return ret;
 }
 
 INT wifi_setRadioDfsAtBootUpEnable(INT radioIndex, BOOL enable) // Tr181
