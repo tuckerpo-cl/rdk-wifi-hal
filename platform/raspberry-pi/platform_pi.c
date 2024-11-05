@@ -378,10 +378,12 @@ static int get_sta_list_handler(struct nl_msg *msg, void *arg)
     struct genlmsghdr *gnlh = nlmsg_data(nlmsg_hdr(msg));
     sta_list_t *sta_list = (sta_list_t *)arg;
 
-    struct nlattr *attrs = nlmsg_attrdata(nlmsg_hdr(msg), sizeof(*gnlh));
-    int len = nlmsg_attrlen(nlmsg_hdr(msg), sizeof(*gnlh));
+    if (nla_parse(tb, NL80211_ATTR_MAX, genlmsg_attrdata(gnlh, 0), genlmsg_attrlen(gnlh, 0),
+        NULL) < 0) {
+        wifi_hal_error_print("%s:%d Failed to parse sta data\n", __func__, __LINE__);
+        return NL_SKIP;
+    }
 
-    nla_parse(tb, NL80211_ATTR_MAX, attrs, len, NULL);
     if (tb[NL80211_ATTR_MAC]) {
         sta_list->macs = realloc(sta_list->macs, (sta_list->num + 1) * sizeof(mac_address_t));
         if (sta_list->macs) {
@@ -470,8 +472,6 @@ static int get_sta_stats_handler(struct nl_msg *msg, void *arg)
     struct nlattr *tb[NL80211_ATTR_MAX + 1];
     struct nlattr *stats[NL80211_STA_INFO_MAX + 1];
     struct genlmsghdr *gnlh = nlmsg_data(nlmsg_hdr(msg));
-    struct nlattr *attrs = nlmsg_attrdata(nlmsg_hdr(msg), sizeof(*gnlh));
-    int len = nlmsg_attrlen(nlmsg_hdr(msg), sizeof(*gnlh));
     static struct nla_policy stats_policy[NL80211_STA_INFO_MAX + 1] = {
                 [NL80211_STA_INFO_INACTIVE_TIME] = { .type = NLA_U32 },
                 [NL80211_STA_INFO_RX_BYTES] = { .type = NLA_U32 },
@@ -487,7 +487,11 @@ static int get_sta_stats_handler(struct nl_msg *msg, void *arg)
     };
     struct nl80211_sta_flag_update *sta_flags;
 
-    nla_parse(tb, NL80211_ATTR_MAX, attrs, len, NULL);
+    if (nla_parse(tb, NL80211_ATTR_MAX, genlmsg_attrdata(gnlh, 0),genlmsg_attrlen(gnlh, 0),
+        NULL) < 0) {
+        wifi_hal_error_print("%s:%d Failed to parse sta data\n", __func__, __LINE__);
+        return NL_SKIP;
+    }
 
     if (!tb[NL80211_ATTR_STA_INFO]) {
         wifi_hal_error_print("%s:%d Failed to get sta info attribute\n", __func__, __LINE__);
