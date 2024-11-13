@@ -132,8 +132,10 @@ static int move_radio_capability(wifi_radio_capabilities_t *tmp_cap, wifi_radio_
             case WIFI_FREQUENCY_5L_BAND:
             case WIFI_FREQUENCY_5H_BAND:
             case WIFI_FREQUENCY_5_BAND:
-            case WIFI_FREQUENCY_6_BAND:
                 tmp_cap->channelWidth[0] = (WIFI_CHANNELBANDWIDTH_20MHZ | WIFI_CHANNELBANDWIDTH_40MHZ | WIFI_CHANNELBANDWIDTH_80MHZ | WIFI_CHANNELBANDWIDTH_160MHZ);
+            break;
+            case WIFI_FREQUENCY_6_BAND:
+                tmp_cap->channelWidth[0] = (WIFI_CHANNELBANDWIDTH_20MHZ | WIFI_CHANNELBANDWIDTH_40MHZ | WIFI_CHANNELBANDWIDTH_80MHZ | WIFI_CHANNELBANDWIDTH_160MHZ | WIFI_CHANNELBANDWIDTH_320MHZ);
             break;
             default:
             break;

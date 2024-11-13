@@ -1232,19 +1232,7 @@ INT wifi_hal_createVAP(wifi_radio_index_t index, wifi_vap_info_map_t *map)
                 wifi_hal_info_print("%s:%d: interface:%s create bridge:%s\n", __func__, __LINE__,
                     interface->name, vap->bridge_name);
 #if defined(VNTXER5_PORT)
-                if(radio->oper_param.variant & WIFI_80211_VARIANT_BE)
-                {
-
-                    if (nl80211_remove_from_ovs_bridge(interface->name) != 0) {
-                        wifi_hal_error_print("%s:%d: interface:%s failed to remove from OVS bridge\n",
-                                __func__, __LINE__, interface->name);
-                    }
-
-                    if (radio->configured && radio->oper_param.enable) {
-                        wifi_hal_info_print("%s:%d: interface:%s set up\n", __func__, __LINE__,
-                            interface->name);
-                        nl80211_interface_enable(interface->name, true);
-                    }
+                if (radio->oper_param.variant & WIFI_80211_VARIANT_BE) {
                     snprintf(mld_ifname, sizeof(mld_ifname), "mld%d",  vap->vap_index);
                     if (nl80211_create_bridge(mld_ifname, vap->bridge_name) != 0) {
                         wifi_hal_error_print("%s:%d: interface:%s failed to create bridge:%s\n",
@@ -3780,6 +3768,20 @@ void wifi_hal_radius_eap_failure_callback_register(wifi_radiusEapFailure_callbac
     }
     callbacks->radius_eap_cb[callbacks->num_radius_eap_cbs] = func;
     callbacks->num_radius_eap_cbs++;
+}
+
+void wifi_hal_radiusFallback_failover_callback_register(wifi_radiusFallback_failover_callback func)
+{
+    wifi_device_callbacks_t *callbacks;
+
+    callbacks = get_hal_device_callbacks();
+
+    if (callbacks == NULL || callbacks->num_radius_fallback_failover_cbs >= MAX_REGISTERED_CB_NUM) {
+        return;
+    }
+
+    callbacks->radius_failover_fallback_cbs[callbacks->num_radius_fallback_failover_cbs] = func;
+    callbacks->num_radius_fallback_failover_cbs++;
 }
 
 void wifi_hal_staConnectionStatus_callback_register(wifi_staConnectionStatus_callback func)

@@ -129,6 +129,8 @@ typedef struct {
     unsigned int                            num_disassoc_cbs;
     unsigned int                            num_radius_eap_cbs;
     wifi_radiusEapFailure_callback          radius_eap_cb[MAX_REGISTERED_CB_NUM];
+    unsigned int                            num_radius_fallback_failover_cbs;
+    wifi_radiusFallback_failover_callback   radius_failover_fallback_cbs[MAX_REGISTERED_CB_NUM];
     unsigned int                            num_vapstatus_cbs;
     queue_t                                 *queue;
     wifi_RMBeaconReport_callback            bcnrpt_callback[MAX_AP_INDEX];

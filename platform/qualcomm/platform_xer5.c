@@ -1350,7 +1350,7 @@ static int qca_add_intf_to_bridge(wifi_interface_info_t *interface, bool is_mld)
 
             snprintf(mld_ifname, sizeof(mld_ifname), "%s%d", MLD_PREFIX, vap->vap_index);
             if (is_mld) {
-                if (nl80211_remove_from_ovs_bridge(interface->name) != 0) {
+                if (nl80211_remove_from_bridge(interface->name) != 0) {
                     wifi_hal_error_print("%s:%d: interface:%s failed to remove from OVS bridge\n",
                     __func__, __LINE__, interface->name);
                 }
@@ -1363,7 +1363,7 @@ static int qca_add_intf_to_bridge(wifi_interface_info_t *interface, bool is_mld)
                 wifi_hal_info_print("%s:%d: interface:%s set bridge %s up\n", __func__, __LINE__,
                         mld_ifname, vap->bridge_name);
             } else {
-                if (nl80211_remove_from_ovs_bridge(mld_ifname) != 0) {
+                if (nl80211_remove_from_bridge(mld_ifname) != 0) {
                     wifi_hal_error_print("%s:%d: interface:%s failed to remove from OVS bridge\n",
                        __func__, __LINE__, interface->name);
                 }

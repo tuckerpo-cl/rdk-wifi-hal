@@ -865,7 +865,7 @@ static void nl80211_ch_switch_notify_event(wifi_interface_info_t *interface, str
 */
     if (b_bypass_callback) return;
 #endif
-    if ((callbacks != NULL) && (callbacks->channel_change_event_callback)) {
+    if ((callbacks != NULL) && (callbacks->channel_change_event_callback) && !(radio_channel_param.sub_event == WIFI_EVENT_RADAR_NOP_FINISHED)) {
         radio_channel_param.radioIndex = interface->vap_info.radio_index;
         radio_channel_param.event = wifi_chan_event_type;
         radio_channel_param.channel = channel;
