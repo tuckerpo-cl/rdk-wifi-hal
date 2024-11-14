@@ -3317,22 +3317,6 @@ int ovs_br_del_if(const char *brname, const char *ifname)
     return 0;
 }
 
-int nl80211_remove_from_ovs_bridge(const char *if_name)
-{
-    char ovs_brname[IFNAMSIZ];
-
-    if (access(OVS_MODULE, F_OK) == 0) {
-        if (ovs_if_get_br(ovs_brname, if_name) == 0) {
-            wifi_hal_dbg_print("%s:%d delete interface:%s mapping from ovs_brname:%s\n",  __func__, __LINE__, if_name, ovs_brname);
-            if(ovs_br_del_if(ovs_brname, if_name) != 0) {
-                wifi_hal_error_print("%s:%d deleting interface:%s on bridge:%s failed\n",  __func__, __LINE__, if_name, ovs_brname);
-                return -1;
-            }
-        }
-    }
-    return 0;
-}
-
 int nl80211_set_mac(wifi_interface_info_t *interface)
 {
     int ret;
@@ -3456,7 +3440,18 @@ int nl80211_create_bridge(const char *if_name, const char *br_name)
     struct rtnl_link *bridge, *device;
     char ovs_brname[IFNAMSIZ];
     bool is_hotspot_interface = false;
+#if defined(VNTXER5_PORT)
+    int ap_index;
+#endif
     is_hotspot_interface = is_wifi_hal_vap_hotspot_from_interfacename(if_name);
+
+#if defined(VNTXER5_PORT)
+    if (strncmp(if_name, "mld", 3) == 0) {
+        sscanf(if_name + 3, "%d", &ap_index);
+        wifi_hal_info_print("%s:%d: ap_index is %d for interface:%s\n", __func__, __LINE__, ap_index, if_name);
+        is_hotspot_interface |= is_wifi_hal_vap_hotspot(ap_index);
+    }
+#endif
 
     wifi_hal_info_print("%s:%d: bridge:%s interface:%s is hotspot:%d\n", __func__, __LINE__,
         br_name, if_name, is_hotspot_interface);
@@ -4845,7 +4840,7 @@ static int wiphy_dump_handler(struct nl_msg *msg, void *arg)
 #if defined(VNTXER5_PORT)
     int existing_radio_found = 0;
 #endif
-    if (g_wifi_hal.num_radios >= MAX_NUM_RADIOS) {
+    if (g_wifi_hal.num_radios > MAX_NUM_RADIOS) {
         return NL_SKIP;
     }
 
@@ -5838,6 +5833,9 @@ int init_nl80211()
     // dump all phy info
     g_wifi_hal.num_radios = 0;
     memset((unsigned char *)g_wifi_hal.radio_info, 0, MAX_NUM_RADIOS*sizeof(wifi_radio_info_t));
+    for (int i = 0; i < MAX_NUM_RADIOS; i++) {
+        g_wifi_hal.radio_info[i].index = -1;
+    }
     init_interface_map();
 #if !defined(VNTXER5_PORT)
     msg = nl80211_drv_cmd_msg(g_wifi_hal.nl80211_id, NULL, NLM_F_DUMP, NL80211_CMD_GET_WIPHY);
@@ -7723,327 +7721,271 @@ int nl80211_connect_sta(wifi_interface_info_t *interface)
     wifi_radio_info_t *radio;
     wifi_hal_dbg_print("%s:%d:bssid:%s frequency:%d ssid:%s\n", __func__, __LINE__,
         to_mac_str(backhaul->bssid, bssid_str), backhaul->freq, backhaul->ssid);
-    // If the security mode is wpa3-personal it's handled by sme.c
-    if ((security->mode == wifi_security_mode_wpa3_personal) ||
-        (security->mode == wifi_security_mode_wpa3_enterprise) ||
-        (security->mode == wifi_security_mode_wpa3_transition)) {
-        if ((interface->wpa_s.current_ssid == NULL) || (interface->wpa_s.p2pdev == NULL) ||
-            (interface->wpa_s.conf == NULL)) {
-            wifi_hal_error_print("%s:%d NULL Pointer\n", __func__, __LINE__);
-            return -1;
-        }
+
+    if ((interface->wpa_s.current_ssid == NULL) || (interface->wpa_s.p2pdev == NULL) ||
+        (interface->wpa_s.conf == NULL)) {
+        wifi_hal_error_print("%s:%d NULL Pointer\n", __func__, __LINE__);
+        return -1;
+    }
+    if (interface->wpa_s.current_bss == NULL) {
         interface->wpa_s.current_bss = (struct wpa_bss *)malloc(
-            sizeof(struct wpa_bss) + interface->ie_len);
+                sizeof(struct wpa_bss) + interface->ie_len);
         if (interface->wpa_s.current_bss == NULL) {
             wifi_hal_error_print("%s:%d NULL Pointer\n", __func__, __LINE__);
             return -1;
         }
-        // Fill in current bss struct where we are going to connect.
-        memset(interface->wpa_s.current_bss, 0, sizeof(struct wpa_bss) + interface->ie_len);
-        strcpy(interface->wpa_s.current_bss->ssid, backhaul->ssid);
-        interface->wpa_s.current_bss->ssid_len = strlen(backhaul->ssid);
-        memcpy(interface->wpa_s.current_bss->bssid, backhaul->bssid, ETH_ALEN);
-        memcpy(interface->wpa_s.current_ssid->bssid, backhaul->bssid, ETH_ALEN);
-        if (security->encr == wifi_encryption_aes) {
-            interface->wpa_s.current_ssid->pairwise_cipher = WPA_CIPHER_CCMP;
-            interface->wpa_s.current_ssid->group_cipher = WPA_CIPHER_CCMP;
-        } else if (security->encr == wifi_encryption_tkip) {
-            interface->wpa_s.current_ssid->pairwise_cipher = WPA_CIPHER_TKIP;
-            interface->wpa_s.current_ssid->group_cipher = WPA_CIPHER_TKIP;
-        } else if (security->encr == wifi_encryption_aes_tkip) {
-            interface->wpa_s.current_ssid->pairwise_cipher = WPA_CIPHER_TKIP;
-            interface->wpa_s.current_ssid->group_cipher = WPA_CIPHER_CCMP;
-        } else {
-            wifi_hal_info_print("%s:%d:Invalid encryption mode:%d in wifi_hal_connect\n", __func__,
-                __LINE__, security->encr);
-            return -1;
-        }
+    }
+    // Fill in current bss struct where we are going to connect.
+    memset(interface->wpa_s.current_bss, 0, sizeof(struct wpa_bss) + interface->ie_len);
+    strcpy(interface->wpa_s.current_bss->ssid, backhaul->ssid);
+    interface->wpa_s.current_bss->ssid_len = strlen(backhaul->ssid);
+    memcpy(interface->wpa_s.current_bss->bssid, backhaul->bssid, ETH_ALEN);
+    memcpy(interface->wpa_s.current_ssid->bssid, backhaul->bssid, ETH_ALEN);
+    if (security->encr == wifi_encryption_aes) {
+        interface->wpa_s.current_ssid->pairwise_cipher = WPA_CIPHER_CCMP;
+        interface->wpa_s.current_ssid->group_cipher = WPA_CIPHER_CCMP;
+    } else if (security->encr == wifi_encryption_tkip) {
+        interface->wpa_s.current_ssid->pairwise_cipher = WPA_CIPHER_TKIP;
+        interface->wpa_s.current_ssid->group_cipher = WPA_CIPHER_TKIP;
+    } else if (security->encr == wifi_encryption_aes_tkip) {
+        interface->wpa_s.current_ssid->pairwise_cipher = WPA_CIPHER_TKIP;
+        interface->wpa_s.current_ssid->group_cipher = WPA_CIPHER_CCMP;
+    } else {
+        wifi_hal_info_print("%s:%d:Invalid encryption mode:%d in wifi_hal_connect\n", __func__,
+            __LINE__, security->encr);
+        return -1;
+    }
 
-        update_wpa_sm_params(interface);
-        interface->wpa_s.current_ssid->proto = WPA_PROTO_RSN;
-        interface->wpa_s.current_ssid->group_mgmt_cipher = WPA_CIPHER_AES_128_CMAC;
-        interface->wpa_s.current_ssid->key_mgmt = WPA_KEY_MGMT_SAE;
+    update_wpa_sm_params(interface);
+    interface->wpa_s.current_ssid->proto = WPA_PROTO_RSN;
+    interface->wpa_s.current_ssid->group_mgmt_cipher = WPA_CIPHER_AES_128_CMAC;
+
+    interface->wpa_s.current_ssid->key_mgmt = interface->u.sta.wpa_sm->key_mgmt;
+    if ((security->mode == wifi_security_mode_wpa3_personal) ||
+        (security->mode == wifi_security_mode_wpa3_transition) ||
+        (security->mode == wifi_security_mode_wpa3_enterprise)) {
+        interface->wpa_s.current_ssid->ieee80211w = MGMT_FRAME_PROTECTION_REQUIRED;
+        if (interface->wpa_s.conf->sae_groups == NULL) {
+            interface->wpa_s.conf->sae_groups = (int *)malloc(MAX_SAE_GROUP);
+            if (interface->wpa_s.conf->sae_groups == NULL) {
+                wifi_hal_error_print("%s:%d: NULL pointer\n", __func__, __LINE__);
+                free(interface->wpa_s.current_bss);
+                interface->wpa_s.current_bss = NULL;
+                return -1;
+            }
+        }
+        memset(interface->wpa_s.conf->sae_groups, 0, MAX_SAE_GROUP);
+    }
+    if (interface->wpa_s.current_ssid->ssid == NULL) {
         interface->wpa_s.current_ssid->ssid = malloc(strlen(backhaul->ssid) + 1);
         if (interface->wpa_s.current_ssid->ssid == NULL) {
             wifi_hal_error_print("%s:%d: NULL pointer\n", __func__, __LINE__);
+            free(interface->wpa_s.current_bss);
+            interface->wpa_s.current_bss = NULL;
+            if (interface->wpa_s.conf->sae_groups) {
+                free(interface->wpa_s.conf->sae_groups);
+                interface->wpa_s.conf->sae_groups = NULL;
+            }
             return -1;
         }
-        memset(interface->wpa_s.current_ssid->ssid, 0, (strlen(backhaul->ssid) + 1));
-        strcpy(interface->wpa_s.current_ssid->ssid, backhaul->ssid);
-        interface->wpa_s.current_ssid->ssid_len = strlen(backhaul->ssid);
-        interface->wpa_s.current_ssid->ieee80211w = MGMT_FRAME_PROTECTION_REQUIRED;
-        interface->wpa_s.current_bss->freq = backhaul->freq;
-        interface->wpa_s.current_bss->ie_len = interface->ie_len;
-        interface->wpa_s.current_bss->beacon_ie_len = interface->beacon_ie_len;
-        interface->wpa_s.drv_priv = interface;
-        radio = get_radio_by_phy_index(interface->phy_index);
-        interface->wpa_s.hw.modes = radio->hw_modes;
-        interface->wpa_s.hw.num_modes = NUM_NL80211_BANDS;
-        memcpy(interface->wpa_s.own_addr, vap->u.sta_info.mac, ETH_ALEN);
-        struct wpa_bss *curr_bss = (struct wpa_bss *)malloc(
-            sizeof(struct wpa_bss) + interface->ie_len);
-        if (curr_bss == NULL) {
-            wifi_hal_error_print("%s:%d: NULL pointer\n", __func__, __LINE__);
-            return -1;
-        }
-        memset(curr_bss, 0, sizeof(struct wpa_bss) + interface->ie_len);
-        strcpy(curr_bss->ssid, backhaul->ssid);
-        curr_bss->ssid_len = strlen(backhaul->ssid);
-        memcpy(curr_bss->bssid, backhaul->bssid, ETH_ALEN);
-        curr_bss->freq = backhaul->freq;
-        curr_bss->ie_len = interface->ie_len;
-        curr_bss->beacon_ie_len = interface->beacon_ie_len;
-        if (interface->ie != NULL) {
-            memcpy(curr_bss + 1, interface->ie, interface->ie_len);
-        }
-        interface->wpa_s.current_ssid->passphrase = malloc(MAX_PWD_LEN);
-        if (interface->wpa_s.current_ssid->passphrase == NULL) {
-            wifi_hal_error_print("%s:%d: NULL pointer\n", __func__, __LINE__);
-            return -1;
-        }
-        memset(interface->wpa_s.current_ssid->passphrase, 0, MAX_PWD_LEN);
+    }
+
+    if (security->mode == wifi_security_mode_wpa3_personal) {
         interface->wpa_s.current_ssid->sae_password = malloc(MAX_PWD_LEN);
         if (interface->wpa_s.current_ssid->sae_password == NULL) {
             wifi_hal_error_print("%s:%d: NULL pointer\n", __func__, __LINE__);
+            free(interface->wpa_s.current_ssid->ssid);
+            interface->wpa_s.current_ssid->ssid = NULL;
+            free(interface->wpa_s.current_bss);
+            interface->wpa_s.current_bss = NULL;
             return -1;
         }
         memset(interface->wpa_s.current_ssid->sae_password, 0, MAX_PWD_LEN);
-        strncpy(interface->wpa_s.current_ssid->passphrase, security->u.key.key,
-            strlen(security->u.key.key) + 1);
         strncpy(interface->wpa_s.current_ssid->sae_password, security->u.key.key,
-            strlen(security->u.key.key) + 1);
-        interface->wpa_s.driver = &g_wpa_supplicant_driver_nl80211_ops;
-        memcpy(interface->wpa_s.conf->ssid, interface->wpa_s.current_ssid, sizeof(struct wpa_ssid));
-        interface->wpa_s.conf->sae_groups = (int *)malloc(MAX_SAE_GROUP);
-        if (interface->wpa_s.conf->sae_groups == NULL) {
-            wifi_hal_error_print("%s:%d: NULL pointer\n", __func__, __LINE__);
-            return -1;
-        }
-        memset(interface->wpa_s.conf->sae_groups, 0, MAX_SAE_GROUP);
-        memcpy(interface->wpa_s.bssid, backhaul->bssid, ETH_ALEN);
-        dl_list_add(&interface->wpa_s.bss, &interface->wpa_s.current_bss->list);
-        sme_send_authentication(&interface->wpa_s, curr_bss, interface->wpa_s.current_ssid, 1);
-        return 0;
-    } else {
-        if ((interface->wpa_s.current_ssid == NULL) || (interface->wpa_s.p2pdev == NULL) ||
-            (interface->wpa_s.conf == NULL)) {
-            wifi_hal_error_print("%s:%d NULL Pointer\n", __func__, __LINE__);
-            return -1;
-        }
-        interface->wpa_s.current_bss = (struct wpa_bss *)malloc(
-            sizeof(struct wpa_bss) + interface->ie_len);
-        if (interface->wpa_s.current_bss == NULL) {
-            wifi_hal_error_print("%s:%d NULL Pointer\n", __func__, __LINE__);
-            return -1;
-        }
-        // Fill in current bss struct where we are going to connect.
-        memset(interface->wpa_s.current_bss, 0, sizeof(struct wpa_bss) + interface->ie_len);
-        interface->wpa_s.current_bss->ssid_len = strlen(backhaul->ssid);
-        strncpy(interface->wpa_s.current_bss->ssid, backhaul->ssid,
-            sizeof(interface->wpa_s.current_bss->ssid) - 1);
-        memcpy(interface->wpa_s.current_bss->bssid, backhaul->bssid, ETH_ALEN);
-        memcpy(interface->wpa_s.current_ssid->bssid, backhaul->bssid, ETH_ALEN);
-        if (security->encr == wifi_encryption_aes) {
-            interface->wpa_s.current_ssid->pairwise_cipher = WPA_CIPHER_CCMP;
-            interface->wpa_s.current_ssid->group_cipher = WPA_CIPHER_CCMP;
-        } else if (security->encr == wifi_encryption_tkip) {
-            interface->wpa_s.current_ssid->pairwise_cipher = WPA_CIPHER_TKIP;
-            interface->wpa_s.current_ssid->group_cipher = WPA_CIPHER_TKIP;
-        } else if (security->encr == wifi_encryption_aes_tkip) {
-            interface->wpa_s.current_ssid->pairwise_cipher = WPA_CIPHER_TKIP;
-            interface->wpa_s.current_ssid->group_cipher = WPA_CIPHER_CCMP;
-        } else {
-            wifi_hal_info_print("%s:%d:Invalid encryption mode:%d in wifi_hal_connect\n", __func__,
-                __LINE__, security->encr);
-            free(interface->wpa_s.current_bss);
-            interface->wpa_s.current_bss = NULL;
-            return -1;
-        }
-
-        update_wpa_sm_params(interface);
-        interface->wpa_s.current_ssid->proto = WPA_PROTO_RSN;
-        interface->wpa_s.current_ssid->key_mgmt = WPA_KEY_MGMT_PSK;
-        interface->wpa_s.current_ssid->ssid = malloc(strlen(backhaul->ssid) + 1);
-        if (interface->wpa_s.current_ssid->ssid == NULL) {
-            wifi_hal_error_print("%s:%d: NULL pointer\n", __func__, __LINE__);
-            free(interface->wpa_s.current_bss);
-            interface->wpa_s.current_bss = NULL;
-            return -1;
-        }
-
-        interface->wpa_s.current_ssid->ssid_len = 0;
-
-        interface->wpa_s.current_ssid->ieee80211w = 0;
-        interface->wpa_s.current_bss->freq = backhaul->freq;
-        interface->wpa_s.current_bss->ie_len = interface->ie_len;
-        interface->wpa_s.current_bss->beacon_ie_len = interface->beacon_ie_len;
-        interface->wpa_s.drv_priv = interface;
-        radio = get_radio_by_phy_index(interface->phy_index);
-        interface->wpa_s.hw.modes = radio->hw_modes;
-        interface->wpa_s.hw.num_modes = NUM_NL80211_BANDS;
-        memcpy(interface->wpa_s.own_addr, vap->u.sta_info.mac, ETH_ALEN);
-        struct wpa_bss *curr_bss = (struct wpa_bss *)malloc(
-            sizeof(struct wpa_bss) + interface->ie_len);
-        if (curr_bss == NULL) {
-            wifi_hal_error_print("%s:%d: NULL pointer\n", __func__, __LINE__);
-            free(interface->wpa_s.current_ssid->ssid);
-            free(interface->wpa_s.current_bss);
-            interface->wpa_s.current_ssid->ssid = NULL;
-            interface->wpa_s.current_bss = NULL;
-            return -1;
-        }
-        memset(curr_bss, 0, sizeof(struct wpa_bss) + interface->ie_len);
-        curr_bss->ssid_len = strlen(backhaul->ssid);
-        strncpy(curr_bss->ssid, backhaul->ssid, sizeof(curr_bss->ssid) - 1);
-        memcpy(curr_bss->bssid, backhaul->bssid, ETH_ALEN);
-        curr_bss->freq = backhaul->freq;
-        curr_bss->ie_len = interface->ie_len;
-        curr_bss->beacon_ie_len = interface->beacon_ie_len;
-        if (interface->ie != NULL) {
-            memcpy(curr_bss + 1, interface->ie, interface->ie_len);
-        }
-        interface->wpa_s.current_ssid->bssid_set = 1;
+            strlen(security->u.key.key) - 1);
+    } else if ((security->mode != wifi_security_mode_wpa2_enterprise) &&
+        (security->mode != wifi_security_mode_wpa3_enterprise)) {
         interface->wpa_s.current_ssid->passphrase = malloc(MAX_PWD_LEN);
         if (interface->wpa_s.current_ssid->passphrase == NULL) {
             wifi_hal_error_print("%s:%d: NULL pointer\n", __func__, __LINE__);
             free(interface->wpa_s.current_ssid->ssid);
             free(interface->wpa_s.current_bss);
-            interface->wpa_s.current_ssid->ssid = NULL;
-            interface->wpa_s.current_bss = NULL;
-            free(curr_bss);
             return -1;
         }
-        strncpy(interface->wpa_s.current_ssid->passphrase, security->u.key.key, MAX_PWD_LEN - 1);
-        interface->wpa_s.driver = &g_wpa_supplicant_driver_nl80211_ops;
-        memcpy(interface->wpa_s.conf->ssid, interface->wpa_s.current_ssid, sizeof(struct wpa_ssid));
-        memcpy(interface->wpa_s.bssid, backhaul->bssid, ETH_ALEN);
-        dl_list_add(&interface->wpa_s.bss, &interface->wpa_s.current_bss->list);
-        sme_send_authentication(&interface->wpa_s, curr_bss, interface->wpa_s.current_ssid, 1);
-        return 0;
+        interface->wpa_s.current_ssid->bssid_set = 1;
+        interface->wpa_s.current_ssid->ssid_len = 0;
+        memset(interface->wpa_s.current_ssid->passphrase, 0, MAX_PWD_LEN);
+        strncpy(interface->wpa_s.current_ssid->passphrase, security->u.key.key,
+            strlen(security->u.key.key) - 1);
     }
+
+    if (security->mode != wifi_security_mode_wpa3_personal) {
+        interface->wpa_s.current_ssid->ieee80211w = security->mfp;
+    }
+
+    memset(interface->wpa_s.current_ssid->ssid, 0, (strlen(backhaul->ssid) + 1));
+    strcpy(interface->wpa_s.current_ssid->ssid, backhaul->ssid);
+    if ((security->mode != wifi_security_mode_wpa2_personal) &&
+            (security->mode != wifi_security_mode_wpa3_transition)) {
+        interface->wpa_s.current_ssid->ssid_len = strlen(backhaul->ssid);
+    }
+    interface->wpa_s.current_bss->freq = backhaul->freq;
+    interface->wpa_s.current_bss->ie_len = interface->ie_len;
+    interface->wpa_s.current_bss->beacon_ie_len = interface->beacon_ie_len;
+    interface->wpa_s.drv_priv = interface;
+    radio = get_radio_by_phy_index(interface->phy_index);
+    interface->wpa_s.hw.modes = radio->hw_modes;
+    interface->wpa_s.hw.num_modes = NUM_NL80211_BANDS;
+    memcpy(interface->wpa_s.own_addr, vap->u.sta_info.mac, ETH_ALEN);
+    struct wpa_bss *curr_bss = (struct wpa_bss *)malloc(sizeof(struct wpa_bss) + interface->ie_len);
+    if (curr_bss == NULL) {
+        wifi_hal_error_print("%s:%d: NULL pointer\n", __func__, __LINE__);
+        free(interface->wpa_s.current_ssid->ssid);
+        free(interface->wpa_s.current_bss);
+        if (interface->wpa_s.current_ssid->sae_password)
+            free(interface->wpa_s.current_ssid->sae_password);
+        if (interface->wpa_s.current_ssid->passphrase)
+            free(interface->wpa_s.current_ssid->passphrase);
+        return -1;
+    }
+    memset(curr_bss, 0, sizeof(struct wpa_bss) + interface->ie_len);
+    strcpy(curr_bss->ssid, backhaul->ssid);
+    curr_bss->ssid_len = strlen(backhaul->ssid);
+    memcpy(curr_bss->bssid, backhaul->bssid, ETH_ALEN);
+    curr_bss->freq = backhaul->freq;
+    curr_bss->ie_len = interface->ie_len;
+    curr_bss->beacon_ie_len = interface->beacon_ie_len;
+    if (interface->ie != NULL) {
+        memcpy(curr_bss + 1, interface->ie, interface->ie_len);
+    }
+    interface->wpa_s.driver = &g_wpa_supplicant_driver_nl80211_ops;
+    memcpy(interface->wpa_s.conf->ssid, interface->wpa_s.current_ssid, sizeof(struct wpa_ssid));
+    memcpy(interface->wpa_s.bssid, backhaul->bssid, ETH_ALEN);
+    dl_list_add(&interface->wpa_s.bss, &interface->wpa_s.current_bss->list);
+    sme_send_authentication(&interface->wpa_s, curr_bss, interface->wpa_s.current_ssid, 1);
+    free(curr_bss);
+    return 0;
 #else
-    {
-        if ((msg = nl80211_drv_cmd_msg(g_wifi_hal.nl80211_id, interface, 0, NL80211_CMD_CONNECT)) == NULL) {
-            return -1;
-        }
+    if ((msg = nl80211_drv_cmd_msg(g_wifi_hal.nl80211_id, interface, 0, NL80211_CMD_CONNECT)) == NULL) {
+        return -1;
+    }
 
 
-        wifi_hal_dbg_print("%s:%d:bssid:%s frequency:%d ssid:%s\n", __func__, __LINE__,
-                to_mac_str(backhaul->bssid, bssid_str), backhaul->freq, backhaul->ssid);
+    wifi_hal_dbg_print("%s:%d:bssid:%s frequency:%d ssid:%s\n", __func__, __LINE__,
+            to_mac_str(backhaul->bssid, bssid_str), backhaul->freq, backhaul->ssid);
 
-        nla_put(msg, NL80211_ATTR_SSID, strlen(backhaul->ssid), backhaul->ssid);
-        nla_put(msg, NL80211_ATTR_MAC, sizeof(backhaul->bssid), backhaul->bssid);
-        nla_put_u32(msg, NL80211_ATTR_WIPHY_FREQ, backhaul->freq);
+    nla_put(msg, NL80211_ATTR_SSID, strlen(backhaul->ssid), backhaul->ssid);
+    nla_put(msg, NL80211_ATTR_MAC, sizeof(backhaul->bssid), backhaul->bssid);
+    nla_put_u32(msg, NL80211_ATTR_WIPHY_FREQ, backhaul->freq);
 
-        pos = rsn_ie;
+    pos = rsn_ie;
 
 
-        if (backhaul->ie_len && (wpa_parse_wpa_ie_rsn(backhaul->ie, backhaul->ie_len, &data) == 0)) {
-            wpa_conf.wpa_group = data.group_cipher;
-            wpa_conf.rsn_pairwise = WPA_CIPHER_CCMP;
-            if (data.key_mgmt & WPA_KEY_MGMT_NONE) {
-                wpa_conf.wpa_key_mgmt = WPA_KEY_MGMT_NONE; 
-            } else {
-                sel = (WPA_KEY_MGMT_PSK | WPA_KEY_MGMT_PSK_SHA256) & data.key_mgmt;
-                key_mgmt = pick_akm_suite(sel); 
-
-                if (key_mgmt == -1) {
-                    wifi_hal_error_print("Unsupported AKM suite: 0x%x\n", data.key_mgmt);
-                    return -1;
-                }
-
-                wpa_conf.wpa_key_mgmt = key_mgmt;
-            }
-
-            wifi_hal_dbg_print("update_wpa_sm_params%x %x %x\n", data.group_cipher, data.pairwise_cipher,
-                    key_mgmt);
+    if (backhaul->ie_len && (wpa_parse_wpa_ie_rsn(backhaul->ie, backhaul->ie_len, &data) == 0)) {
+        wpa_conf.wpa_group = data.group_cipher;
+        wpa_conf.rsn_pairwise = WPA_CIPHER_CCMP;
+        if (data.key_mgmt & WPA_KEY_MGMT_NONE) {
+            wpa_conf.wpa_key_mgmt = WPA_KEY_MGMT_NONE;
         } else {
-            if (security->mode == wifi_security_mode_none) {
-                wpa_conf.wpa_key_mgmt = WPA_KEY_MGMT_NONE;
-                wpa_conf.wpa_group = WPA_CIPHER_NONE;
-                wpa_conf.rsn_pairwise = WPA_CIPHER_NONE;
-            } else {
-                if (security->encr == wifi_encryption_aes) {
-                    wpa_conf.wpa_group = WPA_CIPHER_CCMP;
-                    wpa_conf.rsn_pairwise = WPA_CIPHER_CCMP;
-                } else if (security->encr == wifi_encryption_tkip) {
-                    wpa_conf.wpa_group = WPA_CIPHER_TKIP;
-                    wpa_conf.rsn_pairwise = WPA_CIPHER_TKIP;
-                } else if (security->encr == wifi_encryption_aes_tkip) {
-                    wpa_conf.wpa_group = WPA_CIPHER_TKIP;
-                    wpa_conf.rsn_pairwise = WPA_CIPHER_CCMP;
-                } else {
-                    wifi_hal_info_print("%s:%d:Invalid encryption mode:%d in wifi_hal_connect\n", __func__, __LINE__, security->encr);
-                }
+            sel = (WPA_KEY_MGMT_PSK | WPA_KEY_MGMT_PSK_SHA256) & data.key_mgmt;
+            key_mgmt = pick_akm_suite(sel);
 
-                switch (security->mode) {
-                    case wifi_security_mode_wpa_personal:
-                    case wifi_security_mode_wpa2_personal:
-                    case wifi_security_mode_wpa_wpa2_personal:
-                        wpa_conf.wpa_key_mgmt = WPA_KEY_MGMT_PSK;
-                        break;
-
-                    case wifi_security_mode_wpa_enterprise:
-                    case wifi_security_mode_wpa2_enterprise:
-                    case wifi_security_mode_wpa_wpa2_enterprise:
-                        wpa_conf.wpa_key_mgmt = WPA_KEY_MGMT_IEEE8021X;
-                        break;
-                    case wifi_security_mode_wpa3_personal:
-                    case wifi_security_mode_wpa3_enterprise:
-                        wpa_conf.wpa_key_mgmt = WPA_KEY_MGMT_SAE;
-                        break;
-                    case wifi_security_mode_wpa3_transition:
-                        wpa_conf.wpa_key_mgmt = WPA_KEY_MGMT_PSK | WPA_KEY_MGMT_SAE;
-                        break;
-                    default:
-                        wifi_hal_info_print("%s:%d:Invalid security mode: %d in wifi_hal_connect\r\n", __func__, __LINE__, security->mode);
-                        wpa_conf.wpa_key_mgmt = -1;
-                        break;
-                }
+            if (key_mgmt == -1) {
+                wifi_hal_error_print("Unsupported AKM suite: 0x%x\n", data.key_mgmt);
+                return -1;
             }
+
+            wpa_conf.wpa_key_mgmt = key_mgmt;
         }
 
-        wpa_conf.ieee80211w = 0;
-
-        if (security->mode != wifi_security_mode_none) {
-            if ((ret = wpa_write_rsn_ie(&wpa_conf, pos, rsn_ie + sizeof(rsn_ie) - pos, NULL)) < 0) {
-                wifi_hal_error_print("%s:%d Failed to build RSN %d\r\n", __func__, __LINE__, ret);
-                return ret;
-            }
-            else {
-                pos += ret;
-                nla_put(msg, NL80211_ATTR_IE, pos - rsn_ie, rsn_ie);
-            }
-
-            if (security->mode == wifi_security_mode_wpa2_enterprise || security->mode == wifi_security_mode_wpa2_personal)
-                ver |= NL80211_WPA_VERSION_2;
-            else
-                ver |= NL80211_WPA_VERSION_1;
-            nla_put_u32(msg, NL80211_ATTR_WPA_VERSIONS, ver);
-
-            nla_put_u32(msg, NL80211_ATTR_CIPHER_SUITES_PAIRWISE, RSN_CIPHER_SUITE_CCMP);
-            nla_put_u32(msg, NL80211_ATTR_CIPHER_SUITE_GROUP, RSN_CIPHER_SUITE_CCMP);
-
-            if (security->mode == wifi_security_mode_wpa2_enterprise)
-                nla_put_u32(msg, NL80211_ATTR_AKM_SUITES, RSN_AUTH_KEY_MGMT_UNSPEC_802_1X);
-            else if (security->mode == wifi_security_mode_wpa2_personal)
-                nla_put_u32(msg, NL80211_ATTR_AKM_SUITES, RSN_AUTH_KEY_MGMT_PSK_OVER_802_1X);
-
-            nla_put_u32(msg, NL80211_ATTR_AUTH_TYPE, NL80211_AUTHTYPE_OPEN_SYSTEM);
-            nla_put_flag(msg, NL80211_ATTR_PRIVACY);
+        wifi_hal_dbg_print("update_wpa_sm_params%x %x %x\n", data.group_cipher, data.pairwise_cipher,
+                key_mgmt);
+    } else {
+        if (security->mode == wifi_security_mode_none) {
+            wpa_conf.wpa_key_mgmt = WPA_KEY_MGMT_NONE;
+            wpa_conf.wpa_group = WPA_CIPHER_NONE;
+            wpa_conf.rsn_pairwise = WPA_CIPHER_NONE;
         } else {
-            nla_put_u32(msg, NL80211_ATTR_AUTH_TYPE, NL80211_AUTHTYPE_OPEN_SYSTEM);
-            wifi_hal_dbg_print("security mode open:%d encr:%d\n", security->mode, security->encr);
+            if (security->encr == wifi_encryption_aes) {
+                wpa_conf.wpa_group = WPA_CIPHER_CCMP;
+                wpa_conf.rsn_pairwise = WPA_CIPHER_CCMP;
+            } else if (security->encr == wifi_encryption_tkip) {
+                wpa_conf.wpa_group = WPA_CIPHER_TKIP;
+                wpa_conf.rsn_pairwise = WPA_CIPHER_TKIP;
+            } else if (security->encr == wifi_encryption_aes_tkip) {
+                wpa_conf.wpa_group = WPA_CIPHER_TKIP;
+                wpa_conf.rsn_pairwise = WPA_CIPHER_CCMP;
+            } else {
+                wifi_hal_info_print("%s:%d:Invalid encryption mode:%d in wifi_hal_connect\n", __func__, __LINE__, security->encr);
+            }
+
+            switch (security->mode) {
+                case wifi_security_mode_wpa_personal:
+                case wifi_security_mode_wpa2_personal:
+                case wifi_security_mode_wpa_wpa2_personal:
+                    wpa_conf.wpa_key_mgmt = WPA_KEY_MGMT_PSK;
+                    break;
+
+                case wifi_security_mode_wpa_enterprise:
+                case wifi_security_mode_wpa2_enterprise:
+                case wifi_security_mode_wpa_wpa2_enterprise:
+                    wpa_conf.wpa_key_mgmt = WPA_KEY_MGMT_IEEE8021X;
+                    break;
+                case wifi_security_mode_wpa3_personal:
+                case wifi_security_mode_wpa3_enterprise:
+                    wpa_conf.wpa_key_mgmt = WPA_KEY_MGMT_SAE;
+                    break;
+                case wifi_security_mode_wpa3_transition:
+                    wpa_conf.wpa_key_mgmt = WPA_KEY_MGMT_PSK | WPA_KEY_MGMT_SAE;
+                    break;
+                default:
+                    wifi_hal_info_print("%s:%d:Invalid security mode: %d in wifi_hal_connect\r\n", __func__, __LINE__, security->mode);
+                    wpa_conf.wpa_key_mgmt = -1;
+                    break;
+            }
+        }
+    }
+
+    wpa_conf.ieee80211w = 0;
+
+    if (security->mode != wifi_security_mode_none) {
+        if ((ret = wpa_write_rsn_ie(&wpa_conf, pos, rsn_ie + sizeof(rsn_ie) - pos, NULL)) < 0) {
+            wifi_hal_error_print("%s:%d Failed to build RSN %d\r\n", __func__, __LINE__, ret);
+            return ret;
+        }
+        else {
+            pos += ret;
+            nla_put(msg, NL80211_ATTR_IE, pos - rsn_ie, rsn_ie);
         }
 
-        ret = nl80211_send_and_recv(msg, NULL, &g_wifi_hal, NULL, NULL);
-        if (ret == 0) {
-            return 0;
-        }
+        if (security->mode == wifi_security_mode_wpa2_enterprise || security->mode == wifi_security_mode_wpa2_personal)
+            ver |= NL80211_WPA_VERSION_2;
+        else
+            ver |= NL80211_WPA_VERSION_1;
+        nla_put_u32(msg, NL80211_ATTR_WPA_VERSIONS, ver);
+
+        nla_put_u32(msg, NL80211_ATTR_CIPHER_SUITES_PAIRWISE, RSN_CIPHER_SUITE_CCMP);
+        nla_put_u32(msg, NL80211_ATTR_CIPHER_SUITE_GROUP, RSN_CIPHER_SUITE_CCMP);
+
+        if (security->mode == wifi_security_mode_wpa2_enterprise)
+            nla_put_u32(msg, NL80211_ATTR_AKM_SUITES, RSN_AUTH_KEY_MGMT_UNSPEC_802_1X);
+        else if (security->mode == wifi_security_mode_wpa2_personal)
+            nla_put_u32(msg, NL80211_ATTR_AKM_SUITES, RSN_AUTH_KEY_MGMT_PSK_OVER_802_1X);
+
+        nla_put_u32(msg, NL80211_ATTR_AUTH_TYPE, NL80211_AUTHTYPE_OPEN_SYSTEM);
+        nla_put_flag(msg, NL80211_ATTR_PRIVACY);
+    } else {
+        nla_put_u32(msg, NL80211_ATTR_AUTH_TYPE, NL80211_AUTHTYPE_OPEN_SYSTEM);
+        wifi_hal_dbg_print("security mode open:%d encr:%d\n", security->mode, security->encr);
+    }
+
+    ret = nl80211_send_and_recv(msg, NULL, &g_wifi_hal, NULL, NULL);
+    if (ret == 0) {
+        return 0;
     }
 #endif /* CONFIG_WIFI_EMULATOR */
     wifi_hal_error_print("%s:%d: connect command failed: ret=%d (%s)\n", __func__, __LINE__,
-                     ret, strerror(-ret));
+            ret, strerror(-ret));
 
     return -1;
 }
@@ -11939,7 +11881,7 @@ wifi_drv_get_hw_feature_data(void *priv, u16 *num_modes, u16 *flags, u8 *dfs_dom
     if (feat & NL80211_PROTOCOL_FEATURE_SPLIT_WIPHY_DUMP)
         *flags = NLM_F_DUMP;
 
-    msg = nl80211_drv_cmd_msg(g_wifi_hal.nl80211_id, NULL, flags, NL80211_CMD_GET_WIPHY);
+    msg = nl80211_drv_cmd_msg(g_wifi_hal.nl80211_id, NULL, *flags, NL80211_CMD_GET_WIPHY);
     if (!msg || nla_put_flag(msg, NL80211_ATTR_SPLIT_WIPHY_DUMP)) {
 #endif
         nlmsg_free(msg);
@@ -13370,7 +13312,6 @@ int wifi_supplicant_drv_authenticate(void *priv, struct wpa_driver_auth_params *
     nla_put_u32(msg, NL80211_ATTR_WIPHY_FREQ, params->freq);
 
     if ((security->mode == wifi_security_mode_wpa3_personal) ||
-        (security->mode == wifi_security_mode_wpa3_enterprise) ||
         (security->mode == wifi_security_mode_wpa3_transition)) {
         nla_put(msg, NL80211_ATTR_SAE_DATA, params->auth_data_len, params->auth_data);
         nla_put_u32(msg, NL80211_ATTR_AUTH_TYPE, NL80211_AUTHTYPE_SAE);
@@ -13479,6 +13420,30 @@ int    wifi_drv_send_radius_eap_failure(void *priv, int failure_code)
     for (int i = 0; i < callbacks->num_radius_eap_cbs; i++) {
         if (callbacks->radius_eap_cb[i] != NULL) {
             callbacks->radius_eap_cb[i](vap->vap_index, failure_code);
+        }
+    }
+    return 0;
+}
+
+int wifi_drv_send_radius_fallback_and_failover(void *priv, int radius_switch_reason)
+{
+    wifi_interface_info_t *interface;
+    wifi_vap_info_t *vap;
+
+    interface = (wifi_interface_info_t *)priv;
+    vap = &interface->vap_info;
+
+    wifi_device_callbacks_t *callbacks;
+
+    callbacks = get_hal_device_callbacks();
+
+    if (callbacks == NULL) {
+        return -1;
+    }
+
+    for (int i = 0; i < callbacks->num_radius_fallback_failover_cbs; i++) {
+        if (callbacks->radius_failover_fallback_cbs[i] != NULL) {
+            callbacks->radius_failover_fallback_cbs[i](vap->vap_index, radius_switch_reason);
         }
     }
     return 0;
@@ -14765,6 +14730,7 @@ const struct wpa_driver_ops g_wpa_driver_nl80211_ops = {
 #endif // CONFIG_VENDOR_COMMANDS
 #if !defined(PLATFORM_LINUX)
     .radius_eap_failure = wifi_drv_send_radius_eap_failure,
+    .radius_fallback_failover = wifi_drv_send_radius_fallback_and_failover,
 #endif // CONFIG_VENDOR_COMMANDS
 #ifdef CMXB7_PORT
     .set_chan_dfs_state = nl80211_set_channel_dfs_state,
@@ -14924,6 +14890,7 @@ const struct wpa_driver_ops g_wpa_supplicant_driver_nl80211_ops = {
 #endif // CONFIG_USE_HOSTAP_BTM_PATCH
 #endif // CONFIG_VENDOR_COMMANDS
     .radius_eap_failure = wifi_drv_send_radius_eap_failure,
+    .radius_fallback_failover = wifi_drv_send_radius_fallback_and_failover,
 #ifdef CMXB7_PORT
     .set_chan_dfs_state = nl80211_set_channel_dfs_state,
 #endif

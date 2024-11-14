@@ -194,9 +194,7 @@ int get_emu_neighbor_stats(uint radio_index, wifi_neighbor_ap2_t **neighbor_ap_a
     snprintf(file_path, sizeof(file_path), "/dev/shm/wifi_neighbor_ap_emu_%u", radio_index);
 
     if (access(file_path, F_OK) != 0) {
-        wifi_hal_error_print("%s:%d: File does not exist, emulation likely disabled.\n", __func__,
-            __LINE__);
-        return RETURN_ERR;
+        return RETURN_OK;
     }
 
     sem = sem_open(SEM_NAME, 0);

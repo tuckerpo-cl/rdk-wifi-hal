@@ -42,6 +42,7 @@
 
 #define MACF      "%02x:%02x:%02x:%02x:%02x:%02x"
 #define MAC_TO_MACF(addr)    addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]
+#define RADIUS_FALLBACK_TIMER_IN_SECS   12*60*60
 
 extern const struct wpa_driver_ops g_wpa_driver_nl80211_ops;
 
@@ -477,7 +478,7 @@ int update_security_config(wifi_vap_security_t *sec, struct hostapd_bss_config *
         case wifi_security_mode_wpa3_transition:
             conf->wpa_key_mgmt = WPA_KEY_MGMT_PSK | WPA_KEY_MGMT_SAE;
 #ifdef CONFIG_IEEE80211BE
-            conf->wpa_key_mgmt |= (conf->disable_11be ? 0 : WPA_KEY_MGMT_SAE_EXT_KEY);
+//            conf->wpa_key_mgmt |= (conf->disable_11be ? 0 : WPA_KEY_MGMT_SAE_EXT_KEY);
 #endif
             conf->auth_algs = WPA_AUTH_ALG_SAE | WPA_AUTH_ALG_SHARED | WPA_AUTH_ALG_OPEN;
 #if HOSTAPD_VERSION >= 210 //2.10
@@ -590,6 +591,7 @@ int update_security_config(wifi_vap_security_t *sec, struct hostapd_bss_config *
                 case wifi_security_mode_none:
                 case wifi_security_mode_wpa_wpa2_personal:
                 case wifi_security_mode_wpa2_personal:
+                case wifi_security_mode_wpa3_transition:
                 case wifi_security_mode_wpa_enterprise:
                 case wifi_security_mode_wpa2_enterprise:
                 case wifi_security_mode_wpa_wpa2_enterprise:
@@ -662,6 +664,8 @@ int update_security_config(wifi_vap_security_t *sec, struct hostapd_bss_config *
             conf->radius->auth_server = servers + 1;
             conf->radius->auth_servers[0].shared_secret = shared_secrets;
             conf->radius->auth_servers[1].shared_secret = shared_secrets + shared_secret_chunk;
+            conf->radius->fallback_already_done = false;
+            conf->radius->retry_primary_interval = RADIUS_FALLBACK_TIMER_IN_SECS;
         }
 
         char output[256] = {0};
@@ -1581,6 +1585,13 @@ int update_hostap_iface(wifi_interface_info_t *interface)
         iface->conf->ht_capab |= HT_CAP_INFO_SUPP_CHANNEL_WIDTH_SET;
     }
 
+    if (iface->current_mode->mode != HOSTAPD_MODE_IEEE80211B &&
+        iface->current_mode->mode != HOSTAPD_MODE_IEEE80211G &&
+        (iface->conf->ht_capab & HT_CAP_INFO_DSSS_CCK40MHZ)) {
+        wifi_hal_info_print("%s:%d Disable HT capability [DSSS_CCK-40] on 5 GHz band\n",__func__,__LINE__);
+        iface->conf->ht_capab &= ~HT_CAP_INFO_DSSS_CCK40MHZ;
+    }
+
     iface->conf->vht_capab &= ~VHT_CAP_SUPP_CHAN_WIDTH_MASK;
     if (param->channelWidth == WIFI_CHANNELBANDWIDTH_160MHZ) {
         iface->conf->vht_capab |= VHT_CAP_SUPP_CHAN_WIDTH_160MHZ;
@@ -2369,6 +2380,7 @@ void update_wpa_sm_params(wifi_interface_info_t *interface)
     unsigned short ie_len;
     mac_addr_str_t bssid_str;
     int sel, key_mgmt = 0;
+    int wpa_key_mgmt_11w = 0;
 
     vap = &interface->vap_info;
     sec = &vap->u.sta_info.security;
@@ -2413,6 +2425,42 @@ void update_wpa_sm_params(wifi_interface_info_t *interface)
     }
 #ifdef CONFIG_WIFI_EMULATOR
     interface->wpa_s.wpa = interface->u.sta.wpa_sm;
+#ifdef CONFIG_IEEE80211W
+    unsigned int ieee80211w;
+    ieee80211w = (enum mfp_options)sec->mfp;
+    switch (ieee80211w) {
+    case MGMT_FRAME_PROTECTION_REQUIRED:
+        wpa_key_mgmt_11w &= ~(WPA_KEY_MGMT_PSK | WPA_KEY_MGMT_IEEE8021X);
+        if (sec->mode == wifi_security_mode_wpa3_transition) {
+            wpa_key_mgmt_11w |= WPA_KEY_MGMT_PSK_SHA256;
+        }
+
+        if (sec->mode == wifi_security_mode_wpa2_personal) {
+            wpa_key_mgmt_11w |= WPA_KEY_MGMT_PSK_SHA256;
+        }
+        /* FALLTHROUGH */
+    case MGMT_FRAME_PROTECTION_OPTIONAL:
+        switch (sec->mode) {
+        case wifi_security_mode_wpa_personal:
+        case wifi_security_mode_wpa2_personal:
+        case wifi_security_mode_wpa_wpa2_personal:
+            wpa_key_mgmt_11w |= WPA_KEY_MGMT_PSK_SHA256;
+            break;
+        case wifi_security_mode_wpa_enterprise:
+        case wifi_security_mode_wpa2_enterprise:
+        case wifi_security_mode_wpa_wpa2_enterprise:
+            wpa_key_mgmt_11w |= WPA_KEY_MGMT_IEEE8021X_SHA256;
+            break;
+        default:
+            break;
+        }
+        break;
+
+    case NO_MGMT_FRAME_PROTECTION:
+    default:
+        break;
+    }
+#endif
 #endif
 
     sm = interface->u.sta.wpa_sm;
@@ -2434,7 +2482,7 @@ void update_wpa_sm_params(wifi_interface_info_t *interface)
         if (data.key_mgmt & WPA_KEY_MGMT_NONE) {
             wpa_sm_set_param(sm, WPA_PARAM_KEY_MGMT, WPA_KEY_MGMT_NONE);
         } else {
-            sel = (WPA_KEY_MGMT_PSK | WPA_KEY_MGMT_PSK_SHA256) & data.key_mgmt;
+            sel = (WPA_KEY_MGMT_PSK | WPA_KEY_MGMT_PSK_SHA256 | wpa_key_mgmt_11w) & data.key_mgmt;
             key_mgmt = pick_akm_suite(sel); 
 
             if (key_mgmt == -1) {
@@ -2464,14 +2512,21 @@ void update_wpa_sm_params(wifi_interface_info_t *interface)
                 wpa_sm_set_param(sm, WPA_PARAM_GROUP, WPA_CIPHER_TKIP);
             }
 
-            if (sec->mode == wifi_security_mode_wpa2_personal)
+            if (sec->mode == wifi_security_mode_wpa2_personal) {
+                sel = (WPA_KEY_MGMT_PSK | wpa_key_mgmt_11w);
                 wpa_sm_set_param(sm, WPA_PARAM_KEY_MGMT, WPA_KEY_MGMT_PSK);
-            else if (sec->mode == wifi_security_mode_wpa2_enterprise)
-                wpa_sm_set_param(sm, WPA_PARAM_KEY_MGMT, WPA_KEY_MGMT_IEEE8021X);
-            else {
+            } else if (sec->mode == wifi_security_mode_wpa2_enterprise) {
+                sel = (WPA_KEY_MGMT_IEEE8021X | wpa_key_mgmt_11w);
+            } else {
                 wifi_hal_error_print("Unsupported security mode : 0x%x\n", sec->mode);
                 return;
             }
+            key_mgmt = pick_akm_suite(sel);
+            if (key_mgmt == -1) {
+                wifi_hal_error_print("Unsupported AKM suite: 0x%x\n", sel);
+                return;
+            }
+            wpa_sm_set_param(sm, WPA_PARAM_KEY_MGMT, key_mgmt);
         }
     }
 
@@ -2568,6 +2623,9 @@ static void wpa_sm_eapol_eap_error_cb(void *ctx, int error_code)
     wifi_hal_dbg_print("%s:%d: Enter\n", __func__, __LINE__);
 }
 
+#define MAX_STR_LEN 64
+#define SUPPORTED_CIPHERS \
+        "DEFAULT:@SECLEVEL=0"
 void update_eapol_sm_params(wifi_interface_info_t *interface)
 {
     struct eapol_ctx *ctx;
@@ -2598,41 +2656,88 @@ void update_eapol_sm_params(wifi_interface_info_t *interface)
         interface->wpa_s.wpa->eapol = interface->u.sta.wpa_sm->eapol;
         interface->wpa_s.eapol = interface->u.sta.wpa_sm->eapol;
 #endif
-        eapol_sm_notify_portControl(interface->u.sta.wpa_sm->eapol, ForceAuthorized);
         eapol_sm_notify_eap_success(interface->u.sta.wpa_sm->eapol, 1);
         eapol_sm_notify_eap_fail(interface->u.sta.wpa_sm->eapol, 0);
-
-        if (sec->mode == wifi_security_mode_wpa2_enterprise || sec->mode == wifi_security_mode_wpa3_enterprise) {
+#ifndef CONFIG_WIFI_EMULATOR
+        eapol_sm_notify_portControl(interface->u.sta.wpa_sm->eapol, ForceAuthorized);
+#else
+        if ((sec->mode == wifi_security_mode_wpa2_enterprise) ||
+            (sec->mode == wifi_security_mode_wpa3_enterprise)) {
+            eapol_sm_notify_portControl(interface->u.sta.wpa_sm->eapol, Auto);
+        } else {
+            eapol_sm_notify_portControl(interface->u.sta.wpa_sm->eapol, ForceAuthorized);
+        }
+#endif // CONFIG_WIFI_EMULATOR
+        if (sec->mode == wifi_security_mode_wpa2_enterprise ||
+            sec->mode == wifi_security_mode_wpa3_enterprise) {
             switch (sec->u.radius.eap_type) {
-                case WIFI_EAP_TYPE_PWD:
-                    interface->u.sta.wpa_eapol_config.identity = (unsigned char *)&sec->u.radius.identity;
-                    interface->u.sta.wpa_eapol_config.identity_len = strlen(sec->u.radius.identity);
-                    interface->u.sta.wpa_eapol_config.password = (unsigned char *)&sec->u.radius.key;
-                    interface->u.sta.wpa_eapol_config.password_len = strlen(sec->u.radius.key);
-
-                    interface->u.sta.wpa_eapol_method.vendor = EAP_VENDOR_IETF;
-                    interface->u.sta.wpa_eapol_method.method = EAP_TYPE_PWD;
-                    eap_peer_pwd_register();
+            case WIFI_EAP_TYPE_PWD:
+                interface->u.sta.wpa_eapol_method.method = EAP_TYPE_PWD;
+                eap_peer_pwd_register();
                 break;
-                case WIFI_EAP_TYPE_MD5:
-                    eap_peer_md5_register();
+            case WIFI_EAP_TYPE_MD5:
+                interface->u.sta.wpa_eapol_method.method = EAP_TYPE_MD5;
+                eap_peer_md5_register();
                 break;
-                case WIFI_EAP_TYPE_TLS:
-                    eap_peer_tls_register();
+            case WIFI_EAP_TYPE_TLS:
+                interface->u.sta.wpa_eapol_method.method = EAP_TYPE_TLS;
+                eap_peer_tls_register();
                 break;
-                case WIFI_EAP_TYPE_MSCHAPV2:
-                    eap_peer_mschapv2_register();
+            case WIFI_EAP_TYPE_MSCHAPV2:
+                interface->u.sta.wpa_eapol_method.method = EAP_TYPE_MSCHAPV2;
+                eap_peer_mschapv2_register();
                 break;
-                case WIFI_EAP_TYPE_PEAP:
-                    eap_peer_peap_register();
+            case WIFI_EAP_TYPE_PEAP:
+                interface->u.sta.wpa_eapol_method.method = EAP_TYPE_PEAP;
+                eap_peer_peap_register();
                 break;
-                case WIFI_EAP_TYPE_TTLS:
-                    eap_peer_ttls_register();
+            case WIFI_EAP_TYPE_TTLS:
+                interface->u.sta.wpa_eapol_method.method = EAP_TYPE_TTLS;
+                eap_peer_ttls_register();
                 break;
-                default:
-                    wifi_hal_error_print("%s:%d: Unsupported EAP method :%d\n",  __func__, __LINE__, sec->u.radius.eap_type);
-                    return;
+            default:
+                wifi_hal_error_print("%s:%d: Unsupported EAP method :%d\n", __func__, __LINE__,
+                    sec->u.radius.eap_type);
+                return;
             }
+#ifdef CONFIG_WIFI_EMULATOR
+            if (vap->vap_mode == wifi_vap_mode_sta) {
+                if (interface->u.sta.wpa_eapol_config.openssl_ciphers == NULL) {
+                    interface->u.sta.wpa_eapol_config.openssl_ciphers = (char *)malloc(MAX_STR_LEN);
+                    if (interface->u.sta.wpa_eapol_config.openssl_ciphers == NULL) {
+                        wifi_hal_error_print("%s:%d: NULL Pointer\n", __func__, __LINE__);
+                        return;
+                    }
+                }
+                memset(interface->u.sta.wpa_eapol_config.openssl_ciphers, 0, MAX_STR_LEN);
+                strncpy(interface->u.sta.wpa_eapol_config.openssl_ciphers, SUPPORTED_CIPHERS,
+                        MAX_STR_LEN - 1);
+                if (interface->u.sta.wpa_eapol_config.phase2 == NULL) {
+                    interface->u.sta.wpa_eapol_config.phase2 = (char *)malloc(MAX_STR_LEN);
+                    if (interface->u.sta.wpa_eapol_config.phase2 == NULL) {
+                        wifi_hal_error_print("%s:%d: NULL Pointer\n", __func__, __LINE__);
+                        return;
+                    }
+                }
+                memset(interface->u.sta.wpa_eapol_config.phase2, 0, MAX_STR_LEN);
+                switch (sec->u.radius.phase2) {
+                case WIFI_EAP_PHASE2_PAP:
+                    strncpy(interface->u.sta.wpa_eapol_config.phase2, "auth=PAP", MAX_STR_LEN - 1);
+                    break;
+                default:
+                    // using PAP as default value.
+                    strncpy(interface->u.sta.wpa_eapol_config.phase2, "auth=PAP", MAX_STR_LEN - 1);
+                    break;
+                }
+            }
+            interface->u.sta.wpa_eapol_config.fragment_size = 400;
+            eapol_sm_notify_portControl(interface->u.sta.wpa_sm->eapol, Auto);
+#endif // CONFIG_WIFI_EMULATOR
+            interface->u.sta.wpa_eapol_method.vendor = EAP_VENDOR_IETF;
+            interface->u.sta.wpa_eapol_config.identity = (unsigned char *)&sec->u.radius.identity;
+            interface->u.sta.wpa_eapol_config.identity_len = strlen(sec->u.radius.identity);
+            interface->u.sta.wpa_eapol_config.password = (unsigned char *)&sec->u.radius.key;
+            interface->u.sta.wpa_eapol_config.password_len = strlen(sec->u.radius.key);
 
             interface->u.sta.wpa_eapol_config.eap_methods = &interface->u.sta.wpa_eapol_method;
             eapol_sm_notify_config(interface->u.sta.wpa_sm->eapol, &interface->u.sta.wpa_eapol_config, NULL);
